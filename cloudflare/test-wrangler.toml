@@ -1,0 +1,6 @@
+name = "ops-test-script"
+main = "test-script.ts"
+compatibility_date = "2024-09-17"
+[[services]]
+binding = "UCC_PRODUCTION"
+service = "ucc-mca-edge-production"

@@ -1,0 +1,8 @@
+# Wrangler local state
+.wrangler/
+**/.wrangler/
+dist/
+node_modules/
+# Local debug backups
+*.bak
+wrangler-debug.toml
