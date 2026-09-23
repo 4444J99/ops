@@ -2,6 +2,16 @@
 
 **Always-on operations scheduler — the GitHub Actions cron backbone.**
 
+## Activation Status: Parked (Non-Shippable)
+
+- **Classification:** `docs-only-shell` / infra source-only
+- **Status:** Parked (`status: parked` in `seed.yaml`)
+- **Reasons for Non-Shippable State:**
+  - Lacks explicit runtime manifest and deployment proof declared in repository root.
+  - Kept strictly as infra source-only until a production owner re-authorizes activation.
+
+---
+
 This repository is **plane (i)** of a three-plane scheduling model. It is the always-on,
 cloud-resident layer: cron-triggered GitHub Actions workflows that run whether or not any
 human or local machine is awake. It produces durable artifacts (hygiene reports, bookend
