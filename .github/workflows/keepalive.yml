@@ -22,6 +22,7 @@ permissions:
 concurrency:
   group: ops-default-history
   cancel-in-progress: false
+  queue: max
 
 jobs:
   keepalive:

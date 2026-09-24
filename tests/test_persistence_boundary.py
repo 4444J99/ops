@@ -129,7 +129,7 @@ class PersistenceBoundaryTests(unittest.TestCase):
         groups = []
         for filename in STEPS:
             text = (WORKFLOWS / filename).read_text(encoding="utf-8")
-            match = re.search(r"^concurrency:\n  group: ([^\n]+)\n  cancel-in-progress: false$", text, re.MULTILINE)
+            match = re.search(r"^concurrency:\n  group: ([^\n]+)\n  cancel-in-progress: false\n  queue: max$", text, re.MULTILINE)
             self.assertIsNotNone(match)
             groups.append(match.group(1))
         self.assertEqual(groups, ["ops-default-history", "ops-default-history"])
