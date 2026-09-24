@@ -22,9 +22,12 @@ on:
 permissions:
   contents: write   # to commit the report + bookends
 
+# Repository-local persistence boundary shared with the other history writer.
+# This does not allocate provider capacity or coordinate other repositories.
 concurrency:
-  group: org-hygiene-report
+  group: ops-default-history
   cancel-in-progress: false
+  queue: max
 
 env:
   ORG: a-organvm
@@ -172,12 +175,14 @@ jobs:
           DAY="$(date -u +%Y-%m-%d)"
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add reports/ bookends/ || true
+          # A failed report may leave only bookends; persist that failure evidence.
+          git add -- bookends/
+          if [ -d reports ]; then git add -- reports/; fi
           if git diff --cached --quiet; then
             echo "no changes to commit"
           else
             git commit -m "report(hygiene): ${DAY} org hygiene report + bookends [skip ci]"
-            # Rebase-pull guard in case keepalive raced a commit in.
-            git pull --rebase --autostash origin "$(git rev-parse --abbrev-ref HEAD)" || true
+            # Preserve a concurrent external commit; never hide a failed integration.
+            git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)"
             git push
           fi

@@ -1,0 +1,39 @@
+name: Persistence boundary
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/keepalive.yml'
+      - '.github/workflows/org-hygiene-report.yml'
+      - '.github/workflows/persistence-boundary.yml'
+      - 'tests/test_persistence_boundary.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/keepalive.yml'
+      - '.github/workflows/org-hygiene-report.yml'
+      - '.github/workflows/persistence-boundary.yml'
+      - 'tests/test_persistence_boundary.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-persistence-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  persistence-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+      - name: Verify real Git publication boundaries without remote services
+        run: python -m unittest discover -s tests -p 'test_persistence_boundary.py' -v
+      - name: Verify whitespace
+        run: git diff --check
