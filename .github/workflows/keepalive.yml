@@ -17,8 +17,10 @@ permissions:
   contents: write   # to commit the .keepalive touch
   actions: write    # to re-enable auto-disabled workflows
 
+# Repository-local persistence boundary shared with the other history writer.
+# This does not allocate provider capacity or coordinate other repositories.
 concurrency:
-  group: keepalive
+  group: ops-default-history
   cancel-in-progress: false
 
 jobs:
@@ -42,6 +44,8 @@ jobs:
             echo "no change to commit"
           else
             git commit -m "chore(keepalive): touch .keepalive ${STAMP} [skip ci]"
+            # Preserve a concurrent external commit; fail before push on conflict.
+            git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)"
             git push
           fi
 
