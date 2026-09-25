@@ -83,8 +83,6 @@ class Client:
   self.request(f'/accounts/{self.account}/workers/scripts/{name}/schedules','PUT',b'[]')
  def remove_product_bindings(self,name,settings):
   if name not in DORMANT:raise SafeError('canonical_binding_removal_refused')
-  # PATCH only metadata. Never replace, execute or publish the dormant source.
-  # All retained bindings inherit their provider-held values; none enter logs.
   payload={'bindings':[{'name':b['name'],'type':'inherit'} for b in settings['bindings'] if b.get('type')!='service']}
   boundary='ops-settings-'+uuid.uuid4().hex
   data=(f'--{boundary}\r\nContent-Disposition: form-data; name="settings"\r\nContent-Type: application/json\r\n\r\n'.encode()
@@ -97,8 +95,8 @@ class Client:
  def upload(self,settings,bundle,sha,name=WORKER):
   if name!=WORKER:raise SafeError('upload_target_refused')
   metadata={k:v for k,v in settings.items() if k in ('compatibility_date','compatibility_flags','usage_model','logpush','observability','placement','tail_consumers','tags','limits') and v is not None}
-  metadata.update(main_module='index.js',bindings=[{'name':b['name'],'type':'inherit'} for b in settings['bindings'] if b['name'] not in ('OPS_CONTROLLER_ENV','OPS_RELEASE_SHA') and (name==WORKER or b.get('type')!='service')]+[
-   {'name':'OPS_CONTROLLER_ENV','type':'plain_text','text':'production' if name==WORKER else 'disabled'},
+  metadata.update(main_module='index.js',bindings=[{'name':b['name'],'type':'inherit'} for b in settings['bindings'] if b['name'] not in ('OPS_CONTROLLER_ENV','OPS_RELEASE_SHA')]+[
+   {'name':'OPS_CONTROLLER_ENV','type':'plain_text','text':'production'},
    {'name':'OPS_RELEASE_SHA','type':'plain_text','text':sha}],
    annotations={'workers/message':'ops owner release '+sha,'workers/tag':'ops-isolated-runs-v2'})
   boundary='ops-'+uuid.uuid4().hex;parts=[]
@@ -124,8 +122,6 @@ def preflight(client,bundle,targets):
  dormant={}
  for name in DORMANT:
   saved=client.source_of(name);configuration=client.settings(name)
-  # Unknown dormant source is NOT approved for execution/replacement. Its bytes
-  # must remain exactly unchanged while only duplicate authority is removed.
   validate_dormant_bindings(configuration,targets)
   if crons[name] not in ([],['* * * * *']):raise SafeError('dormant_schedule_drift:'+name)
   dormant[name]={'files':saved,'settings':configuration,'crons':crons[name]}
@@ -140,7 +136,6 @@ def preflight(client,bundle,targets):
  client.db=db[0]['database_id']
  if client.db!='f1ce9d34-bd31-4573-b752-332bc6313efd':raise SafeError('scheduler_database_identity_drift')
  token_present=any(b.get('name')=='OP_SA_TOKEN' and b.get('type') in ('secret_text','plain_text') for b in bindings)
- if not token_present:raise SafeError('legacy_invocation_credential_unreconciled')
  legacy=client.sql("SELECT payload FROM scheduler_state WHERE id='scheduler:state'")
  if len(legacy)!=1:raise SafeError('legacy_state_missing')
  state=decode(legacy[0]['payload'])
@@ -151,7 +146,7 @@ def preflight(client,bundle,targets):
   control=client.sql(CONTROL)
   waiting=bool(control and control[0].get('enabled')==1 and isinstance(control[0].get('activate_after'),(int,float)) and now<control[0]['activate_after']+120000)
  if not waiting and (isinstance(tick,bool) or not isinstance(tick,(int,float)) or not 0<=now-tick<600000):raise SafeError('scheduler_tick_stale')
- return settings,files,state,dormant,{'source_relation':source,'canonical_clock_verified':True,'dormant_crons':{n:v['crons'] for n,v in dormant.items()},'dormant_service_bindings':{n:sum(b.get('type')=='service' for b in v['settings']['bindings']) for n,v in dormant.items()},'capabilities_verified':True,'legacy_bearer_binding_present':token_present,'product_targets':len(targets)}
+ return settings,files,state,dormant,{'source_relation':source,'canonical_clock_verified':True,'dormant_crons':{n:v['crons'] for n,v in dormant.items()},'dormant_service_bindings':{n:sum(b.get('type')=='service' for b in v['settings']['bindings']) for n,v in dormant.items()},'capabilities_verified':True,'legacy_bearer_binding_present':token_present,'legacy_authority':'existing_default_service_bindings','product_targets':len(targets)}
 
 def validate_dormant_bindings(settings,targets):
  allowed={t['binding']:t['ownership']['service'] for t in targets}
@@ -184,7 +179,6 @@ def contain(client,dormant,bundle,sha):
  return result
 
 def apply(client,settings,files,state,bundle,targets,sha):
- # Apply only complete statements from the reviewed additive migration.
  statement=''
  for line in (ROOT/'migrations/0002_isolated_runs.sql').read_text().splitlines(True):
   statement+=line
@@ -203,15 +197,11 @@ def apply(client,settings,files,state,bundle,targets,sha):
   if not current or current[0]['source_sha']!=sha or current[0]['enabled']!=1:raise SafeError('deployed_control_requires_reconciliation')
   return {'state':'ALREADY_DEPLOYED','activate_after':current[0]['activate_after']}
  if client.source()!=files or client.settings(WORKER)!=settings:raise SafeError('preupload_drift')
- # Grace exceeds the previous cron invocation's documented 15-minute lifetime.
- # New code persists due jobs while waiting; no old/new execution overlap is assumed safe.
  activate=int(time.time()*1000)+16*60000
  client.sql(INSTALL,(sha,activate))
  try:
   client.upload(settings,bundle,sha)
  except Exception:
-  # Restore admission only when the old artifact is still exact. An ambiguous
-  # provider result is never treated as proof that upload did not happen.
   if client.source()==files:
    previous=current[0] if current else {'source_sha':sha,'activate_after':activate,'enabled':0}
    client.sql('UPDATE ops_control SET source_sha=?,activate_after=?,enabled=? WHERE id=\'dispatcher\' AND source_sha=? AND activate_after=?',

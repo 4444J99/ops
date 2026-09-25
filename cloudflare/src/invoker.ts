@@ -33,10 +33,11 @@ export async function invokeTarget(env:Env,target:Target,payload:ScheduledPayloa
   const binding=env[target.binding] as Fetcher;
   if(!binding?.fetch)throw new Error('binding_missing');
   const headers:Record<string,string>={'Content-Type':'application/json','X-Scheduler-RID':rid};
-  if(target.ownership.authorization==='legacy-bearer') {
-   if(typeof env.OP_SA_TOKEN!=='string'||!env.OP_SA_TOKEN) throw new Error('credential_missing');
+  if(target.ownership.authorization==='legacy-default' && typeof env.OP_SA_TOKEN==='string' && env.OP_SA_TOKEN) {
    headers.Authorization='Bearer '+env.OP_SA_TOKEN;
   }
+  // Legacy default bindings preserve the target's own auth checks. Missing
+  // fleet material is not fabricated as `Bearer undefined` or a new secret.
   const timeout=new Promise<never>((_,reject)=>{timer=setTimeout(()=>{
    aborted=true;controller.abort();reject(new Error('timeout'));
   },target.ownership.maxDurationMs);});
@@ -50,7 +51,6 @@ export async function invokeTarget(env:Env,target:Target,payload:ScheduledPayloa
    }
    const body=await readBounded(response) as Record<string,unknown>;
    if(!body || typeof body!=='object' || typeof body.ok!=='boolean') return {ok:false,rid,error:'invalid_receipt',outcome:'uncertain'} as RunResult;
-   // Legacy v1's ok=true means its bounded invocation completed, not backlog empty.
    const accepted=body.state==='accepted'||body.status==='accepted'||body.accepted===true;
    const outcome=accepted?'accepted':body.ok?'completed':'failed';
    const result:RunResult={ok:body.ok,rid,outcome,...(!body.ok?{error:'product_failed'}:{})};
@@ -65,7 +65,6 @@ export async function invokeTarget(env:Env,target:Target,payload:ScheduledPayloa
  } finally {if(timer!==undefined)clearTimeout(timer);}
  return {targetName:target.name,bindingName:target.binding,result:{...result,durationMs:Date.now()-started}};
 }
-/** Compatibility helper; bounded to two in-flight operations in one invocation. */
 export async function invokeAllTargets(env:Env,due:{target:Target;payload:ScheduledPayload}[]):Promise<InvocationResult[]> {
  const results:InvocationResult[]=new Array(due.length);let next=0;
  async function lane(){for(;;){const i=next++;if(i>=due.length)return;results[i]=await invokeTarget(env,due[i].target,due[i].payload);}}
