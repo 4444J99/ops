@@ -1,0 +1,87 @@
+name: Owner-controlled Cloudflare scheduler release
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      apply_source:
+        required: false
+        type: string
+        default: ''
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+# The only credential carrier is the existing Limen main runner. This group is
+# deliberately the same as that runner's existing incident workflow, so those
+# same-resource mutations cannot overlap inside the one carrier repository.
+concurrency:
+  group: cloudflare-kv-incident-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository_id == '1255213941' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OPS_SOURCE_SHA: ${{ inputs.source_sha }}
+      OPS_APPLY_SOURCE: ${{ inputs.apply_source }}
+    defaults:
+      run:
+        working-directory: cloudflare
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: 4444J99/ops
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require an exact accepted owner revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$OPS_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$OPS_SOURCE_SHA" ]]
+          git merge-base --is-ancestor "$OPS_SOURCE_SHA" refs/remotes/origin/main
+          if [[ -n "$OPS_APPLY_SOURCE" ]]; then
+            [[ "$OPS_APPLY_SOURCE" == "$OPS_SOURCE_SHA" ]]
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate and build before exposing a provider credential
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: |
+          npm ci
+          npm run typecheck
+          npm run check:boundaries
+          npm test
+          npm run test:isolated
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v
+          npm run build
+          node scripts/verify-boundaries.mjs --emit
+      - name: Inspect exact live source and resource boundaries
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          python3 scripts/release.py
+          cp "$RUNNER_TEMP/ops-owner-release.json" "$RUNNER_TEMP/ops-owner-preflight.json"
+      - name: Apply only the explicitly named accepted source
+        if: inputs.apply_source != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python3 scripts/release.py --apply
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ops-owner-release-receipt
+          path: ${{ runner.temp }}/ops-owner-*.json
+          if-no-files-found: warn
+          retention-days: 7
