@@ -12,6 +12,7 @@ export async function tick(event:Pick<ScheduledEvent,'scheduledTime'>,env:Env):P
  if(env.OPS_CONTROLLER_ENV!=='production')throw new Error('noncanonical_controller_disabled');
  if(!Number.isSafeInteger(event.scheduledTime)||!Number.isFinite(new Date(event.scheduledTime).getTime()))throw new Error('invalid_scheduled_time');
  const sha=env.OPS_RELEASE_SHA??'',now=Date.now(),store=new RunStore(env.SCHED_DB);
+ const tickDeadline=now+330000;
  const activation=await store.activation(sha);
  if(activation===null)throw new Error('release_not_admitted');
  // The release actor installs the accepted source before activation; due work
@@ -27,7 +28,7 @@ export async function tick(event:Pick<ScheduledEvent,'scheduledTime'>,env:Env):P
   const claimed=[];
   for(const candidate of candidates.slice(0,MAX_DISPATCHES_PER_TICK-dispatched)) {
    const target=getTargetByName(candidate.target);
-   if(!target?.active)continue;
+   if(!target?.active || Date.now()+target.ownership.maxDurationMs>tickDeadline)continue;
    assertController(target,env.OPS_CONTROLLER_ENV);
    const run=await store.claim(candidate,target,Date.now(),sha);
    if(run)claimed.push({run,target});
@@ -58,9 +59,29 @@ export default {
   } else if(url.pathname==='/status') {
    // Exactly one known-key read, no list, writes, ingestion, or fleet-table scan.
    const row=await env.SCHED_DB.prepare("SELECT payload FROM scheduler_state WHERE id='scheduler:state'").first<{payload:string}>();
-   let state:unknown;try{state=row?JSON.parse(row.payload):null;}catch{state=null;}
-   response=Response.json({scheduler:'ops-scheduler',protocol:PROTOCOL,revision:env.OPS_RELEASE_SHA??null,state},
-    {status:state?200:503,headers});
+   let raw:Record<string,unknown>|null=null;
+   try{const parsed=row?JSON.parse(row.payload):null;if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))raw=parsed;}catch{}
+   const number=(value:unknown)=>Number.isSafeInteger(value)&&Number(value)>=0&&Number(value)<=8640000000000000?Number(value):null;
+   const old=raw?.targetStates as Record<string,Record<string,unknown>>|undefined;
+   const targetStates=Object.fromEntries(SCHEDULE_MANIFEST.filter(t=>t.active).map(t=>{
+    const value=old?.[t.name]??{};
+    return [t.name,{lastInvokedAt:number(value.lastInvokedAt),lastCompletedAt:number(value.lastCompletedAt),
+     lastStatus:['success','failure','timeout','running','accepted','uncertain','skipped'].includes(String(value.lastStatus))?value.lastStatus:'unknown',
+     consecutiveFailures:number(value.consecutiveFailures),
+     lastRunId:typeof value.lastRunId==='string'&&/^[a-z][a-z0-9-]*:(production|staging):\d+:(scheduled|drain)$/.test(value.lastRunId)&&value.lastRunId.length<256?value.lastRunId:null}];
+   }));
+   const state={lastTick:number(raw?.lastTick),targetStates};
+   response=Response.json({scheduler:'ops-scheduler',protocol:PROTOCOL,revision:env.OPS_RELEASE_SHA??null,state,
+    lastTick:state.lastTick===null?null:new Date(state.lastTick).toISOString(),
+    activeTargets:SCHEDULE_MANIFEST.filter(t=>t.active).map(t=>({name:t.name,schedule:t.schedule,binding:t.binding,state:targetStates[t.name]}))},
+    {status:raw?200:503,headers});
+  } else if(url.pathname==='/receipt') {
+   const id=url.searchParams.get('id')??'';
+   if(id.length>255||!/^[a-z][a-z0-9-]*:(production|staging):\d+:(scheduled|drain)$/.test(id))return new Response(null,{status:400});
+   const receipt=await env.SCHED_DB.prepare(`SELECT id,target,environment,repository_id,scheduled_at,mode,state,
+     generation,attempt,started_at,finished_at,lease_until,source_sha,deadline,error_code,completed_items,pending_items
+     FROM ops_runs WHERE id=?`).bind(id).first();
+   response=Response.json({protocol:PROTOCOL,receipt},{status:receipt?200:404,headers});
   } else if(url.pathname==='/bookends') {
    const date=url.searchParams.get('date')??new Date().toISOString().slice(0,10);
    const cursor=Number(url.searchParams.get('cursor')??'0');

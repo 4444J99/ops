@@ -35,7 +35,7 @@ export function validateCost(cost:Cost): void {
   if (!cost || Object.keys(cost).length !== METRICS.length || METRICS.some(k => !Number.isSafeInteger(cost[k]) || cost[k] < 0)) throw new Error('invalid_resource_budget');
 }
 export function validateTargets(targets: readonly RegisteredTarget[]): void {
-  const names = new Set<string>(), bindings = new Set<string>(), resources = new Map<string, number>();
+  const names = new Set<string>(), bindings = new Set<string>(), resources = new Map<string, number>(), capabilities=new Set<string>();
   for (const t of targets) {
     const o=t.ownership;
     parseCron(t.schedule); if(t.continuationSchedule)parseCron(t.continuationSchedule);
@@ -47,6 +47,9 @@ export function validateTargets(targets: readonly RegisteredTarget[]): void {
     const resource=`${o.accountRef}/worker/${o.service}`;
     if (resources.has(resource) && resources.get(resource)!==o.repositoryId) throw new Error('conflicting_resource_owner');
     resources.set(resource,o.repositoryId);
+    const capability=resource+'/'+o.capability;
+    if(capabilities.has(capability))throw new Error('duplicate_resource_capability');
+    capabilities.add(capability);
     if (o.resourceBudget?.state==='bounded') {
       validateCost(o.resourceBudget.perInvocation); validateCost(o.resourceBudget.perDay);
       if (METRICS.some(k => o.resourceBudget.state==='bounded' && o.resourceBudget.perInvocation[k]>o.resourceBudget.perDay[k])) throw new Error('invocation_exceeds_daily_allocation');

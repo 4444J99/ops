@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS ops_targets (
   last_status TEXT NOT NULL DEFAULT 'skipped',
   consecutive_failures INTEGER NOT NULL DEFAULT 0,
   next_allowed INTEGER NOT NULL DEFAULT 0,
+  last_run_id TEXT,
   failure_code TEXT
 );
 CREATE TABLE IF NOT EXISTS ops_runs (
@@ -69,7 +70,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS ops_record_start AFTER UPDATE OF state ON ops_runs
 WHEN NEW.state='running' AND OLD.state='pending'
 BEGIN
-  UPDATE ops_targets SET generation=NEW.generation,last_started=NEW.started_at,last_status='running'
+  UPDATE ops_targets SET generation=NEW.generation,last_started=NEW.started_at,last_status='running',last_run_id=NEW.id
     WHERE target=NEW.target;
   INSERT INTO bookends(id,date,target,phase,status,timestamp,duration_ms)
     VALUES(NEW.id||':start:'||NEW.generation,date(NEW.started_at/1000,'unixepoch'),NEW.target,
@@ -104,6 +105,6 @@ BEGIN
     '$.targetStates.'||json_quote(NEW.target),json_object(
       'lastInvokedAt',NEW.last_started,'lastCompletedAt',NEW.last_completed,
       'lastStatus',NEW.last_status,'consecutiveFailures',NEW.consecutive_failures,
-      'lastFailureCode',NEW.failure_code))
+      'lastFailureCode',NEW.failure_code,'lastRunId',NEW.last_run_id))
     WHERE id='scheduler:state';
 END;

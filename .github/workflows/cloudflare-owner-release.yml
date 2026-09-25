@@ -17,9 +17,7 @@ on:
 permissions:
   contents: read
 
-# The only credential carrier is the existing Limen main runner. This group is
-# deliberately the same as that runner's existing incident workflow, so those
-# same-resource mutations cannot overlap inside the one carrier repository.
+# One existing credential carrier; this matches that carrier's incident lock.
 concurrency:
   group: cloudflare-kv-incident-${{ github.ref }}
   cancel-in-progress: false
@@ -64,6 +62,7 @@ jobs:
           npm run check:boundaries
           npm test
           npm run test:isolated
+          node --test test/d1-runtime.test.mjs
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
           npm run build
           node scripts/verify-boundaries.mjs --emit

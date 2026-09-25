@@ -36,14 +36,20 @@ export class RunStore {
   await this.db.prepare("UPDATE ops_runs SET state='uncertain',error_code='lease_expired' WHERE state='running' AND lease_until<?").bind(now).run();
  }
  async candidates(now:number, targets:readonly Target[]):Promise<Run[]> {
-  const names=targets.filter(t=>t.active).map(t=>t.name);
-  if(!names.length)return [];
-  if(names.length>100)throw new Error('target_selection_bound');
-  const result=await this.db.prepare(`SELECT r.* FROM ops_runs r JOIN ops_targets t ON t.target=r.target
-    WHERE r.state='pending' AND r.target IN(${names.map(()=>'?').join(',')}) AND r.scheduled_at<=? AND t.next_allowed<=?
+  const admitted=targets.filter(t=>t.active).map(t=>({target:t.name,limit:t.ownership.maxInvocationsPerDay}));
+  if(!admitted.length)return [];
+  if(admitted.length>256)throw new Error('target_selection_bound');
+  const day=new Date(now).toISOString().slice(0,10);
+  const result=await this.db.prepare(`WITH admitted AS (
+      SELECT json_extract(value,'$.target') AS target,json_extract(value,'$.limit') AS call_limit FROM json_each(?)
+    ) SELECT r.* FROM ops_runs r JOIN ops_targets t ON t.target=r.target JOIN admitted a ON a.target=r.target
+    LEFT JOIN ops_daily_dispatch d ON d.scope=r.target AND d.day=?
+    WHERE r.state='pending' AND r.scheduled_at<=? AND t.next_allowed<=?
+      AND COALESCE(d.calls,0)<MIN(r.call_limit,a.call_limit)
+      AND COALESCE((SELECT calls FROM ops_daily_dispatch WHERE scope='*' AND day=?),0)<2000
       AND NOT EXISTS(SELECT 1 FROM ops_runs live WHERE live.target=r.target AND live.state IN('running','uncertain','accepted'))
       AND r.id=(SELECT next.id FROM ops_runs next WHERE next.target=r.target AND next.state='pending' ORDER BY next.scheduled_at,next.id LIMIT 1)
-    ORDER BY t.last_started,r.deadline,r.id LIMIT ?`).bind(...names,now,now,MAX_DISPATCHES_PER_TICK).all<Run>();
+    ORDER BY t.last_started,r.deadline,r.id LIMIT ?`).bind(JSON.stringify(admitted),day,now,now,day,MAX_DISPATCHES_PER_TICK).all<Run>();
   return result.results??[];
  }
  async claim(run:Run,target:Target,now:number,sha:string):Promise<Run|null> {

@@ -222,3 +222,43 @@ test('spare bounded tick capacity drains backlog instead of retaining permanent 
  await tick({scheduledTime:NOW},f.env);
  assert.equal(f.counts.calls,4);assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM ops_runs WHERE state='pending'").get().n,0);
 });
+
+test('exhausted targets do not occupy the fair selection window',async()=>{
+ const f=fixture();await f.store.enqueue(SCHEDULE_MANIFEST.map(target=>({target,payload:{target:target.name,scheduledTime:NOW,cron:target.schedule}})),NOW,SHA);
+ for(const t of SCHEDULE_MANIFEST.filter(t=>t.name!=='ucc-production'))f.sql.prepare("INSERT INTO ops_daily_dispatch VALUES('2026-09-25',?,?)").run(t.name,t.ownership.maxInvocationsPerDay);
+ const rows=await f.store.candidates(NOW,SCHEDULE_MANIFEST);assert.equal(rows.length,1);assert.equal(rows[0].target,'ucc-production');
+});
+test('current lower admission allowance applies to old queued work',async()=>{
+ const f=fixture();await queued(f);f.target.ownership.maxInvocationsPerDay=1;
+ f.sql.prepare("INSERT INTO ops_daily_dispatch VALUES('2026-09-25','edgarflash',1)").run();
+ assert.equal((await f.store.candidates(NOW,SCHEDULE_MANIFEST)).length,0);
+});
+test('status projects only known fields and retains the existing read interface',async()=>{
+ const f=fixture();f.sql.prepare("INSERT INTO scheduler_state VALUES('scheduler:state',?)").run(JSON.stringify({lastTick:NOW,secret:'private-secret',targetStates:{edgarflash:{lastStatus:'success',lastCompletedAt:NOW,token:'private-token'}}}));
+ const response=await worker.fetch(new Request('https://ops/status'),f.env);const body=await response.json();
+ assert.equal(body.activeTargets.length,6);assert.equal(body.state.targetStates.edgarflash.lastStatus,'success');assert.ok(!JSON.stringify(body).includes('private-'));
+ assert.equal(f.counts.reads,1);assert.equal(f.counts.writes,0);
+});
+test('successive backlog work never starts beyond the per-tick wall budget',async()=>{
+ const f=fixture();only(f);for(let minute=5;minute>0;minute--)await f.store.enqueue([{target:f.target,payload:{target:f.target.name,scheduledTime:NOW-minute*60000,cron:f.target.schedule}}],NOW,SHA);
+ let count=0;f.env.EDGARFLASH.fetch=async()=>{count++;Date.now=()=>NOW+count*110000;return Response.json({ok:true});};
+ await tick({scheduledTime:NOW},f.env);assert.equal(count,3);assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM ops_runs WHERE state='pending'").get().n,3);
+});
+
+test('independent observers can read a source-bound result without execution authority',async()=>{
+ const f=fixture();only(f);await tick({scheduledTime:NOW},f.env);
+ const status=await (await worker.fetch(new Request('https://ops/status'),f.env)).json();
+ const id=status.state.targetStates.edgarflash.lastRunId;assert.ok(id);
+ const receipt=await (await worker.fetch(new Request('https://ops/receipt?id='+encodeURIComponent(id)),f.env)).json();
+ assert.equal(receipt.receipt.state,'completed');assert.equal(receipt.receipt.source_sha,SHA);assert.equal(receipt.receipt.attempt,1);
+ assert.equal('owner' in receipt.receipt,false);assert.equal(f.counts.calls,1);
+});
+test('the receipt interface refuses arbitrary selectors and handles missing jobs honestly',async()=>{
+ const f=fixture();assert.equal((await worker.fetch(new Request('https://ops/receipt?id=arbitrary'),f.env)).status,400);
+ assert.equal((await worker.fetch(new Request('https://ops/receipt?id=edgarflash:production:123:scheduled'),f.env)).status,404);
+ assert.equal(f.counts.calls,0);
+});
+test('two names cannot register the same resource capability twice',()=>{
+ const f=fixture(),other=structuredClone(f.target);other.name='another-name';other.binding='ANOTHER';
+ assert.throws(()=>C.validateTargets([f.target,other]),/duplicate_resource_capability/);
+});
