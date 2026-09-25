@@ -35,3 +35,11 @@ class EvidenceTests(unittest.TestCase):
  def test_truncated_or_unknown_rows_refused(self):
   with self.assertRaises(ValueError):r.rows([{}]*257,257)
   with self.assertRaises(ValueError):r.project_run({'id':'private','target':'unknown','state':'running'})
+
+ def test_readback_survives_failed_preflight_but_requires_validation(self):
+  from pathlib import Path
+  text=(Path(__file__).resolve().parents[2]/'.github/workflows/cloudflare-owner-release.yml').read_text()
+  self.assertIn('id: validate_owner',text)
+  block=text.split('- name: Read per-run custody and product acknowledgement evidence',1)[1].split('- uses:',1)[0]
+  self.assertIn("if: always() && !cancelled() && steps.validate_owner.outcome == 'success'",block)
+  self.assertNotIn('continue-on-error',text)
