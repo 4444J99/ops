@@ -85,8 +85,8 @@ class DormantTests(unittest.TestCase):
    def settings(self,name):return self.config
    def crons(self,name):return self.cron
    def pause(self,name):self.cron=[]
-   def upload(self,settings,bundle,sha,name):
-    self.files={'index.js':bundle};self.config={'bindings':[b for b in settings['bindings'] if b['type']!='service']}
+   def remove_product_bindings(self,name,settings):
+    self.config={'bindings':[b for b in settings['bindings'] if b['type']!='service']}
   client=Carrier();name='ops-scheduler-staging'
   snapshot={name:{'files':client.files,'settings':client.config,'crons':client.cron}}
   result=m.contain(client,snapshot,b'new','a'*40)
@@ -103,12 +103,44 @@ class UploadTests(unittest.TestCase):
  def test_upload_names_worker_not_last_multipart_file(self):
   client=m.Client('test-only');client.account='a'*32
   settings={'bindings':[{'name':'DB','type':'d1','database_id':'fixture'},{'name':'PRODUCT','type':'service','service':'fixture'}]}
-  for name in (m.WORKER,*m.DORMANT):
+  for name in (m.WORKER,):
    with patch.object(client,'request',return_value={}) as send:
     client.upload(settings,b'export default {}','a'*40,name)
    self.assertTrue(send.call_args.args[0].endswith('/'+name+'?bindings_inherit=strict'))
    raw=send.call_args.args[2]
    self.assertIn(b'name="index.js"',raw)
    self.assertEqual(b'"name": "PRODUCT"' in raw,name==m.WORKER)
+
+class MetadataContainmentTests(unittest.TestCase):
+ def test_unknown_dormant_source_is_preserved_not_overwritten(self):
+  class Carrier:
+   files={'index.js':b'new independent source never approved for execution'}
+   config={'bindings':[]}
+   def source_of(self,name):return self.files
+   def settings(self,name):return self.config
+   def crons(self,name):return []
+   def upload(self,*args):raise AssertionError('must not replace source')
+  client=Carrier()
+  result=m.contain(client,{'ops-scheduler-staging':{'files':client.files,'settings':client.config,'crons':[]}},b'new','a'*40)
+  self.assertTrue(result['ops-scheduler-staging']['source_preserved'])
+ def test_unregistered_service_is_not_silently_removed(self):
+  with self.assertRaisesRegex(m.SafeError,'dormant_unregistered_capability'):
+   m.validate_dormant_bindings({'bindings':[{'name':'OTHER','type':'service','service':'unrelated'}]},[])
+ def test_registered_service_can_be_reduced_without_reading_secret_values(self):
+  m.validate_dormant_bindings({'bindings':[{'name':'EF','type':'service','service':'edgarflash'},{'name':'PRIVATE','type':'secret_text'}]},[{'binding':'EF','ownership':{'service':'edgarflash'}}])
+ def test_dormant_patch_has_only_settings_and_preserves_nonservice_bindings(self):
+  client=m.Client('test-only');client.account='a'*32
+  settings={'bindings':[{'name':'DB','type':'d1','database_id':'private-id'}, {'name':'SECRET','type':'plain_text','text':'private-secret'}, {'name':'PRODUCT','type':'service','service':'fixture'}]}
+  with patch.object(client,'request',return_value={}) as send:
+   client.remove_product_bindings('ops-scheduler-staging',settings)
+  path,method,data,kind=send.call_args.args
+  self.assertEqual(method,'PATCH');self.assertTrue(path.endswith('/ops-scheduler-staging/settings'))
+  self.assertIn(b'name="settings"',data);self.assertNotIn(b'private-',data);self.assertNotIn(b'PRODUCT',data)
+  self.assertIn(b'"name": "SECRET", "type": "inherit"',data)
+ def test_dormant_code_upload_is_not_authorized(self):
+  client=m.Client('test-only')
+  for name in m.DORMANT:
+   with self.assertRaisesRegex(m.SafeError,'upload_target_refused'):client.upload({'bindings':[]},b'new','a'*40,name)
+  with self.assertRaisesRegex(m.SafeError,'canonical_binding_removal_refused'):client.remove_product_bindings(m.WORKER,{'bindings':[]})
 
 if __name__=='__main__':unittest.main()

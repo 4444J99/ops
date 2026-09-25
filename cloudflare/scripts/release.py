@@ -12,8 +12,7 @@ from pathlib import Path
 API='https://api.cloudflare.com/client/v4'
 ROOT=Path(__file__).resolve().parents[1]
 WORKER='ops-scheduler-production'
-DORMANT={'ops-scheduler':'1af405f33c08cd93e95f542111633744ea8ebbf3592e8f8d9915bad12c02af5a',
- 'ops-scheduler-staging':'07e0614e9b9b35841063dd260a64657c08362f6be76893c52879bd5705b1be83'}
+DORMANT=('ops-scheduler','ops-scheduler-staging')
 LEGACY='982048aebacde2af449ed0ff1cb26dcf4c4bb74a36abd7ca09f1f0871e6d5808'
 HELPERS={'finishline.mjs':'7efe3e34d925c63eb972fd5c4d42be9668919c03','diagnosis.mjs':'ce5ae0aa93be70a7c4c836a99d7870608fc66fd7'}
 CONTROL="SELECT source_sha,activate_after,enabled FROM ops_control WHERE id='dispatcher'"
@@ -47,7 +46,7 @@ class Client:
   readable=(path=='/accounts?per_page=50' or bool(re.fullmatch(r'/accounts/[a-f0-9]{32}/workers/subdomain',path)) or
     path in [base+'/workers/scripts/'+name+'/'+part for name in ('ops-scheduler','ops-scheduler-staging',WORKER)
              for part in ('settings','schedules','content/v2','deployments')])
-  writable=method=='PUT' and path in ([base+'/workers/scripts/'+n+'?bindings_inherit=strict' for n in (WORKER,*DORMANT)]+[base+'/workers/scripts/'+n+'/schedules' for n in DORMANT])
+  writable=(method=='PUT' and path in ([base+'/workers/scripts/'+WORKER+'?bindings_inherit=strict']+[base+'/workers/scripts/'+n+'/schedules' for n in DORMANT])) or (method=='PATCH' and path in [base+'/workers/scripts/'+n+'/settings' for n in DORMANT])
   query=method=='POST' and self.db and path==base+'/d1/database/'+self.db+'/query'
   if not ((method=='GET' and readable) or writable or query):raise SafeError('release_endpoint_refused')
   req=urllib.request.Request(API+path,method=method,data=data,headers={
@@ -82,12 +81,21 @@ class Client:
  def pause(self,name):
   if name not in DORMANT:raise SafeError('canonical_clock_pause_refused')
   self.request(f'/accounts/{self.account}/workers/scripts/{name}/schedules','PUT',b'[]')
+ def remove_product_bindings(self,name,settings):
+  if name not in DORMANT:raise SafeError('canonical_binding_removal_refused')
+  # PATCH only metadata. Never replace, execute or publish the dormant source.
+  # All retained bindings inherit their provider-held values; none enter logs.
+  payload={'bindings':[{'name':b['name'],'type':'inherit'} for b in settings['bindings'] if b.get('type')!='service']}
+  boundary='ops-settings-'+uuid.uuid4().hex
+  data=(f'--{boundary}\r\nContent-Disposition: form-data; name="settings"\r\nContent-Type: application/json\r\n\r\n'.encode()
+    +json.dumps(payload).encode()+f'\r\n--{boundary}--\r\n'.encode())
+  self.request(f'/accounts/{self.account}/workers/scripts/{name}/settings','PATCH',data,'multipart/form-data; boundary='+boundary)
  def sql(self,statement,params=()):
   result=self.request(f'/accounts/{self.account}/d1/database/{self.db}/query','POST',json.dumps({'sql':statement,'params':list(params)}).encode())['result']
   if len(result)!=1 or result[0].get('success') is not True:raise SafeError('sql_failed')
   return result[0].get('results',[])
  def upload(self,settings,bundle,sha,name=WORKER):
-  if name not in (WORKER,*DORMANT):raise SafeError('upload_target_refused')
+  if name!=WORKER:raise SafeError('upload_target_refused')
   metadata={k:v for k,v in settings.items() if k in ('compatibility_date','compatibility_flags','usage_model','logpush','observability','placement','tail_consumers','tags','limits') and v is not None}
   metadata.update(main_module='index.js',bindings=[{'name':b['name'],'type':'inherit'} for b in settings['bindings'] if b['name'] not in ('OPS_CONTROLLER_ENV','OPS_RELEASE_SHA') and (name==WORKER or b.get('type')!='service')]+[
    {'name':'OPS_CONTROLLER_ENV','type':'plain_text','text':'production' if name==WORKER else 'disabled'},
@@ -114,10 +122,11 @@ def preflight(client,bundle,targets):
  crons={n:client.crons(n) for n in ('ops-scheduler','ops-scheduler-staging',WORKER)}
  if crons[WORKER]!=['* * * * *']:raise SafeError('canonical_live_clock_drift')
  dormant={}
- for name,expected in DORMANT.items():
+ for name in DORMANT:
   saved=client.source_of(name);configuration=client.settings(name)
-  if saved!={'index.js':bundle} and not (set(saved)=={'index.js'} and digest(saved['index.js'])==expected):
-   raise SafeError('dormant_source_drift:'+name+':'+digest(saved['index.js']))
+  # Unknown dormant source is NOT approved for execution/replacement. Its bytes
+  # must remain exactly unchanged while only duplicate authority is removed.
+  validate_dormant_bindings(configuration,targets)
   if crons[name] not in ([],['* * * * *']):raise SafeError('dormant_schedule_drift:'+name)
   dormant[name]={'files':saved,'settings':configuration,'crons':crons[name]}
  bindings=settings.get('bindings',[])
@@ -144,6 +153,17 @@ def preflight(client,bundle,targets):
  if not waiting and (isinstance(tick,bool) or not isinstance(tick,(int,float)) or not 0<=now-tick<600000):raise SafeError('scheduler_tick_stale')
  return settings,files,state,dormant,{'source_relation':source,'canonical_clock_verified':True,'dormant_crons':{n:v['crons'] for n,v in dormant.items()},'dormant_service_bindings':{n:sum(b.get('type')=='service' for b in v['settings']['bindings']) for n,v in dormant.items()},'capabilities_verified':True,'legacy_bearer_binding_present':token_present,'product_targets':len(targets)}
 
+def validate_dormant_bindings(settings,targets):
+ allowed={t['binding']:t['ownership']['service'] for t in targets}
+ bindings=settings.get('bindings')
+ if not isinstance(bindings,list):raise SafeError('dormant_bindings_invalid')
+ seen=set()
+ for binding in bindings:
+  if not isinstance(binding,dict) or not isinstance(binding.get('name'),str) or binding['name'] in seen:raise SafeError('dormant_bindings_invalid')
+  seen.add(binding['name'])
+  if binding.get('type')=='service' and (binding['name'] not in allowed or binding.get('service')!=allowed[binding['name']]):
+   raise SafeError('dormant_unregistered_capability')
+
 def contain(client,dormant,bundle,sha):
  result={}
  for name,item in dormant.items():
@@ -151,15 +171,16 @@ def contain(client,dormant,bundle,sha):
   if client.source_of(name)!=item['files'] or client.settings(name)!=item['settings'] or client.crons(name)!=item['crons']:
    raise SafeError('dormant_prewrite_drift')
   if item['crons']:client.pause(name)
-  # A disabled copy has neither a clock nor product invocation bindings. Its
-  # original database, other bindings, secrets and historical versions remain.
-  client.upload(item['settings'],bundle,sha,name)
+  if any(b.get('type')=='service' for b in item['settings']['bindings']):
+   client.remove_product_bindings(name,item['settings'])
   after=client.settings(name)
-  original={b['name']:b for b in item['settings']['bindings'] if b.get('type')!='service' and b['name'] not in ('OPS_CONTROLLER_ENV','OPS_RELEASE_SHA')}
-  kept={b['name']:b for b in after['bindings'] if b['name'] not in ('OPS_CONTROLLER_ENV','OPS_RELEASE_SHA')}
-  if client.source_of(name)!={'index.js':bundle} or client.crons(name) or original!=kept:
+  original={b['name']:b for b in item['settings']['bindings'] if b.get('type')!='service'}
+  kept={b['name']:b for b in after['bindings']}
+  if client.source_of(name)!=item['files'] or client.crons(name) or original!=kept:
    raise SafeError('dormant_readback_failed')
-  result[name]={'source_verified':True,'cron':[],'product_bindings':0,'existing_data_preserved':True}
+  result[name]={'source_preserved':True,'source_sha256':digest(item['files']['index.js']),
+    'cron':[],'product_bindings':0,'existing_data_preserved':True}
+  print(json.dumps({'phase':'dormant_authority_removed','worker':name,**result[name]}),flush=True)
  return result
 
 def apply(client,settings,files,state,bundle,targets,sha):
