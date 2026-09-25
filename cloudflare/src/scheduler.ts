@@ -48,13 +48,16 @@ export function getDueTargets(scheduledTime: number): DueTarget[] {
   const due: DueTarget[] = [];
   
   for (const target of activeTargets) {
-    if (isDue(target.schedule, scheduledTime)) {
+    const natural = isDue(target.schedule, scheduledTime);
+    const continuation = !natural && target.continuationSchedule && isDue(target.continuationSchedule, scheduledTime);
+    if (natural || continuation) {
       due.push({
         target,
         payload: {
           scheduledTime,
           cron: target.schedule,
           target: target.name,
+          ...(continuation ? { drainOnly: true } : {}),
         },
       });
     }

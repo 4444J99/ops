@@ -1,147 +1,73 @@
-/**
- * ops-scheduler — Service Binding Invoker
- * 
- * Invokes target Workers via private Service Bindings.
- * Awaits ACTUAL completion, not just ctx.waitUntil registration.
- */
-
-import { Env, Target, ScheduledPayload, RunResult } from './types';
-
-const INVOCATION_TIMEOUT_MS = 110 * 1000; // Leave 5s buffer before 60s Worker limit
-const INTERNAL_PATH = '/internal/run-scheduled';
-
-export interface InvocationResult {
-  targetName: string;
-  result: RunResult;
-  bindingName: string;
+/** Bounded capability invocation. The timeout covers headers AND body parsing. */
+import type { Env, Target, ScheduledPayload, RunResult, InvocationResult } from './types';
+import { assertController } from './contracts';
+const INTERNAL_PATH='/internal/run-scheduled';
+export function failureCode(error:unknown):string {
+ const text=String(error??'');
+ if(/abort|timeout/i.test(text))return 'timeout';
+ if(/subrequests|too many api requests/i.test(text))return 'invocation_request_limit';
+ if(/kv.*(?:limit|quota)/i.test(text))return 'kv_quota';
+ return 'invocation_failed';
 }
-
-/**
- * Invoke a single target via Service Binding.
- * Returns the actual RunResult from the target Worker.
- */
-export async function invokeTarget(
-  env: Env,
-  target: Target,
-  payload: ScheduledPayload
-): Promise<InvocationResult> {
-  const binding = env[target.binding] as Fetcher;
-  const rid = crypto.randomUUID();
-  const started = Date.now();
-  
-  console.log(`[invoker] invoking ${target.name}`, { rid, binding: target.binding });
-  
-  if (!binding) {
-    const error = `Service Binding ${target.binding} not found`;
-    console.error(`[invoker] ${error}`, { target: target.name });
-    return {
-      targetName: target.name,
-      bindingName: target.binding,
-      result: { ok: false, rid, error, durationMs: Date.now() - started },
-    };
-  }
-  
-  try {
-    // Create abort controller for timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), INVOCATION_TIMEOUT_MS);
-    
-    const response = await binding.fetch(
-      `https://internal${INTERNAL_PATH}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Scheduler-RID': rid,
-          'Authorization': `Bearer ${env.OP_SA_TOKEN}`,
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      }
-    );
-    
-    clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '');
-      const error = `HTTP ${response.status}: ${errorText}`;
-      console.error(`[invoker] ${target.name} failed`, { rid, status: response.status, error });
-      return {
-        targetName: target.name,
-        bindingName: target.binding,
-        result: { ok: false, rid, error, durationMs: Date.now() - started },
-      };
-    }
-    
-    const result = await response.json() as RunResult;
-    result.durationMs = Date.now() - started;
-    
-    console.log(`[invoker] ${target.name} completed`, { 
-      rid, 
-      ok: result.ok, 
-      durationMs: result.durationMs 
-    });
-    
-    return {
-      targetName: target.name,
-      bindingName: target.binding,
-      result,
-    };
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    const isTimeout = error.includes('Aborted') || error.includes('timeout');
-    
-    console.error(`[invoker] ${target.name} error`, { 
-      rid, 
-      error, 
-      isTimeout,
-      durationMs: Date.now() - started 
-    });
-    
-    return {
-      targetName: target.name,
-      bindingName: target.binding,
-      result: { 
-        ok: false, 
-        rid, 
-        error: isTimeout ? `TIMEOUT after ${INVOCATION_TIMEOUT_MS}ms` : error,
-        durationMs: Date.now() - started,
-      },
-    };
-  }
+async function readBounded(response:Response):Promise<unknown> {
+ const reader=response.body?.getReader();
+ if(!reader)throw new Error('response_missing');
+ const chunks:Uint8Array[]=[];let total=0;
+ try {
+  for(;;){const {done,value}=await reader.read();if(done)break;total+=value.length;
+   if(total>16384)throw new Error('response_limit');chunks.push(value);}
+ } finally {await reader.cancel().catch(()=>{});reader.releaseLock();}
+ const bytes=new Uint8Array(total);let offset=0;
+ for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
+ return JSON.parse(new TextDecoder().decode(bytes));
 }
-
-/**
- * Invoke all due targets concurrently.
- * One target's failure does NOT block others.
- * Returns results for all targets.
- */
-export async function invokeAllTargets(
-  env: Env,
-  dueTargets: { target: Target; payload: ScheduledPayload }[]
-): Promise<InvocationResult[]> {
-  const invocations = dueTargets.map(({ target, payload }) => 
-    invokeTarget(env, target, payload)
-  );
-  
-  // Use Promise.allSettled to ensure all run regardless of individual failures
-  const settled = await Promise.allSettled(invocations);
-  
-  return settled.map((result, index) => {
-    if (result.status === 'fulfilled') {
-      return result.value;
-    } else {
-      const target = dueTargets[index].target;
-      return {
-        targetName: target.name,
-        bindingName: target.binding,
-        result: { 
-          ok: false, 
-          rid: crypto.randomUUID(), 
-          error: `Invocation promise rejected: ${result.reason}`,
-          durationMs: 0,
-        },
-      };
-    }
-  });
+export async function invokeTarget(env:Env,target:Target,payload:ScheduledPayload):Promise<InvocationResult> {
+ const rid=payload.runId??crypto.randomUUID(),started=Date.now();
+ let timer:ReturnType<typeof setTimeout>|undefined;
+ let aborted=false,dispatched=false;
+ const controller=new AbortController();
+ let result:RunResult;
+ try {
+  assertController(target,env.OPS_CONTROLLER_ENV);
+  if(payload.target!==target.name || !Number.isSafeInteger(payload.scheduledTime))throw new Error('invalid_dispatch');
+  const binding=env[target.binding] as Fetcher;
+  if(!binding?.fetch)throw new Error('binding_missing');
+  const headers:Record<string,string>={'Content-Type':'application/json','X-Scheduler-RID':rid};
+  if(target.ownership.authorization==='legacy-bearer') {
+   if(typeof env.OP_SA_TOKEN!=='string'||!env.OP_SA_TOKEN) throw new Error('credential_missing');
+   headers.Authorization='Bearer '+env.OP_SA_TOKEN;
+  }
+  const timeout=new Promise<never>((_,reject)=>{timer=setTimeout(()=>{
+   aborted=true;controller.abort();reject(new Error('timeout'));
+  },target.ownership.maxDurationMs);});
+  const operation=(async()=>{
+   dispatched=true;
+   const response=await binding.fetch('https://internal'+INTERNAL_PATH,{
+    method:'POST',headers,body:JSON.stringify(payload),signal:controller.signal});
+   if(!response.ok) {
+    await response.body?.cancel().catch(()=>{});
+    return {ok:false,rid,error:response.status===401||response.status===403?'authorization':`http_${response.status}`,outcome:'failed'} as RunResult;
+   }
+   const body=await readBounded(response) as Record<string,unknown>;
+   if(!body || typeof body!=='object' || typeof body.ok!=='boolean') return {ok:false,rid,error:'invalid_receipt',outcome:'uncertain'} as RunResult;
+   // Legacy v1's ok=true means its bounded invocation completed, not backlog empty.
+   const accepted=body.state==='accepted'||body.status==='accepted'||body.accepted===true;
+   const outcome=accepted?'accepted':body.ok?'completed':'failed';
+   const result:RunResult={ok:body.ok,rid,outcome,...(!body.ok?{error:'product_failed'}:{})};
+   for(const key of ['completedItems','pendingItems'] as const)
+    if(Number.isSafeInteger(body[key]) && (body[key] as number)>=0) result[key]=body[key] as number;
+   return result;
+  })();
+  result=await Promise.race([operation,timeout]);
+ } catch(error) {
+  const code=failureCode(error);
+  result={ok:false,rid,error:aborted?'timeout':code,outcome:dispatched?'uncertain':'failed'};
+ } finally {if(timer!==undefined)clearTimeout(timer);}
+ return {targetName:target.name,bindingName:target.binding,result:{...result,durationMs:Date.now()-started}};
+}
+/** Compatibility helper; bounded to two in-flight operations in one invocation. */
+export async function invokeAllTargets(env:Env,due:{target:Target;payload:ScheduledPayload}[]):Promise<InvocationResult[]> {
+ const results:InvocationResult[]=new Array(due.length);let next=0;
+ async function lane(){for(;;){const i=next++;if(i>=due.length)return;results[i]=await invokeTarget(env,due[i].target,due[i].payload);}}
+ await Promise.all([lane(),lane()]);return results;
 }
