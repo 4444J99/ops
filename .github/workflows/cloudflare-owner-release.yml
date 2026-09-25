@@ -38,7 +38,7 @@ jobs:
       run:
         working-directory: cloudflare
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: 4444J99/ops
           ref: ${{ inputs.source_sha }}
@@ -54,7 +54,7 @@ jobs:
           if [[ -n "$OPS_APPLY_SOURCE" ]]; then
             [[ "$OPS_APPLY_SOURCE" == "$OPS_SOURCE_SHA" ]]
           fi
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Validate and build before exposing a provider credential
@@ -99,7 +99,7 @@ jobs:
         run: |
           python3 scripts/runtime_evidence.py
           python3 scripts/uncertain_logs.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ops-owner-release-receipt

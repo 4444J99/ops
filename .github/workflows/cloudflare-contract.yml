@@ -23,10 +23,10 @@ jobs:
       run:
         working-directory: cloudflare
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - run: npm ci
@@ -48,7 +48,7 @@ jobs:
         run: |
           git rev-parse HEAD > SOURCE_COMMIT.txt
           tar --exclude='__pycache__' -czf "${RUNNER_TEMP}/ops-contract-inputs.tgz" src test scripts migrations package.json package-lock.json tsconfig.json vitest.config.ts wrangler.toml wrangler-no-cron.toml SOURCE_COMMIT.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: ops-contract-inputs
