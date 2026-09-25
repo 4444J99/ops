@@ -3,115 +3,57 @@ main = "src/index.ts"
 compatibility_date = "2026-09-17"
 compatibility_flags = ["nodejs_compat"]
 
-# Single minute-level trigger — the consolidation point
+# Dormant compatibility name: no clock and no product invocation authority.
+services = []
 [triggers]
-crons = ["* * * * *"]
-
-# KV for scheduler bookkeeping (minimal usage)
-[[d1_databases]]
-binding = "SCHED_DB"
-database_name = "ops-scheduler"
-database_id = "00000000-0000-0000-0000-000000000000"
-migrations_dir = "migrations"
-
-# Service Bindings — one per target (private, no public endpoints)
-# NO entrypoint - calls default fetch handler at /internal/run-scheduled
-[[services]]
-binding = "BOUNTYSCOPE"
-service = "bountyscope"
-
-[[services]]
-binding = "EDGARFLASH"
-service = "edgarflash"
-
-[[services]]
-binding = "TRENDPULSE"
-service = "trendpulse"
-
-[[services]]
-binding = "VULNPULSE"
-service = "vulnpulse"
-
-[[services]]
-binding = "UCC_STAGING"
-service = "ucc-mca-edge-staging"
-
-[[services]]
-binding = "UCC_PRODUCTION"
-service = "ucc-mca-edge-production"
+crons = []
+[vars]
+OPS_CONTROLLER_ENV = "disabled"
 
 [observability]
 enabled = true
 
 [env.staging]
 name = "ops-scheduler-staging"
-account_id = "e0921b840fd656d8ea46426f1f114c30"
-
+services = []
+[env.staging.vars]
+OPS_CONTROLLER_ENV = "staging"
+[env.staging.triggers]
+crons = []
 [[env.staging.d1_databases]]
 binding = "SCHED_DB"
 database_name = "ops-scheduler-staging"
 database_id = "d8b82c11-92ab-475d-9bbf-71d89e992a0a"
 migrations_dir = "migrations"
 
-[env.staging.triggers]
-crons = ["* * * * *"]
-
-[[env.staging.services]]
-binding = "BOUNTYSCOPE"
-service = "bountyscope"
-
-[[env.staging.services]]
-binding = "EDGARFLASH"
-service = "edgarflash"
-
-[[env.staging.services]]
-binding = "TRENDPULSE"
-service = "trendpulse"
-
-[[env.staging.services]]
-binding = "VULNPULSE"
-service = "vulnpulse"
-
-[[env.staging.services]]
-binding = "UCC_STAGING"
-service = "ucc-mca-edge-staging"
-
-[[env.staging.services]]
-binding = "UCC_PRODUCTION"
-service = "ucc-mca-edge-production"
-
 [env.production]
 name = "ops-scheduler-production"
-
+[env.production.vars]
+OPS_CONTROLLER_ENV = "production"
+# OPS_RELEASE_SHA is supplied by the exact-source release actor, not edited here.
+[env.production.triggers]
+crons = ["* * * * *"]
 [[env.production.d1_databases]]
 binding = "SCHED_DB"
 database_name = "ops-scheduler-production"
 database_id = "f1ce9d34-bd31-4573-b752-332bc6313efd"
 migrations_dir = "migrations"
-
-[env.production.triggers]
-crons = ["* * * * *"]
-
 [[env.production.services]]
 binding = "BOUNTYSCOPE"
 service = "bountyscope"
-
 [[env.production.services]]
 binding = "EDGARFLASH"
 service = "edgarflash"
-
 [[env.production.services]]
 binding = "TRENDPULSE"
 service = "trendpulse"
-
 [[env.production.services]]
 binding = "VULNPULSE"
 service = "vulnpulse"
-
 [[env.production.services]]
 binding = "UCC_STAGING"
 service = "ucc-mca-edge-staging"
-
+entrypoint = "KvIncidentScheduledIngress"
 [[env.production.services]]
 binding = "UCC_PRODUCTION"
 service = "ucc-mca-edge-production"

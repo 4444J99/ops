@@ -5,11 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "deploy:staging": "wrangler deploy --env staging",
-    "deploy:production": "wrangler deploy --env production",
+    "deploy": "python3 scripts/release.py --apply",
+    "deploy:staging": "node -e \"throw new Error('Staging is non-executing; use local contract tests, not a second production scheduler')\"",
+    "deploy:production": "python3 scripts/release.py --apply",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "check:boundaries": "node scripts/verify-boundaries.mjs",
+    "test:isolated": "node --test test/isolated-runs.test.mjs",
+    "release:preflight": "python3 scripts/release.py"
   },
   "dependencies": {
     "cron-parser": "^4.9.0"

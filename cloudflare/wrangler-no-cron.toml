@@ -1,45 +1,11 @@
+# Retired deployment configuration retained for custody. It cannot run products.
+# The canonical production release uses wrangler.toml through scripts/release.py.
 name = "ops-scheduler"
 main = "src/index.ts"
 compatibility_date = "2026-09-17"
 compatibility_flags = ["nodejs_compat"]
-
-# NO CRON - temporarily removing to re-add
-
-# KV for scheduler bookkeeping (minimal usage)
-[[kv_namespaces]]
-binding = "SCHED_KV"
-id = "9b69822e9a6641618bd48133e6450ea8"
-
-# Service Bindings — one per target (private, no public endpoints)
-[[services]]
-binding = "BOUNTYSCOPE"
-service = "bountyscope"
-entrypoint = "runScheduled"
-
-[[services]]
-binding = "EDGARFLASH"
-service = "edgarflash"
-entrypoint = "runScheduled"
-
-[[services]]
-binding = "TRENDPULSE"
-service = "trendpulse"
-entrypoint = "runScheduled"
-
-[[services]]
-binding = "VULNPULSE"
-service = "vulnpulse"
-entrypoint = "runScheduled"
-
-[[services]]
-binding = "UCC_STAGING"
-service = "ucc-mca-edge-staging"
-entrypoint = "runScheduled"
-
-[[services]]
-binding = "UCC_PRODUCTION"
-service = "ucc-mca-edge-production"
-entrypoint = "runScheduled"
-
-[observability]
-enabled = true
+services = []
+[vars]
+OPS_CONTROLLER_ENV = "disabled"
+[triggers]
+crons = []

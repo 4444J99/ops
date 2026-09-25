@@ -26,6 +26,7 @@ export function parseCron(expression: string): ParsedCron {
   }
   
   const [minuteSpec, hourSpec, domSpec, monthSpec, dowSpec] = parts;
+  if (domSpec !== '*' && dowSpec !== '*') throw new Error('combined_dom_dow_requires_explicit_contract');
   
   return {
     minutes: parseField(minuteSpec, 0, 59),
@@ -41,43 +42,22 @@ export function parseCron(expression: string): ParsedCron {
  * Supports: *, star/N, N, N-M, N,M,K
  */
 function parseField(spec: string, min: number, max: number): number[] {
-  if (spec === '*') {
-    return range(min, max);
+  if (spec === '*') return range(min, max);
+  if (/^\*\/\d+$/.test(spec)) {
+    const step = Number(spec.slice(2));
+    if (!Number.isSafeInteger(step) || step <= 0 || step > max - min + 1) throw new Error('invalid_cron_step');
+    return range(min,max).filter(v => (v-min)%step===0);
   }
-  
-  // Handle star/N (step)
-  if (spec.startsWith('*/')) {
-    const step = parseInt(spec.slice(2), 10);
-    if (isNaN(step) || step <= 0) {
-      throw new Error(`Invalid step in ${spec}`);
-    }
-    const values: number[] = [];
-    for (let i = min; i <= max; i += step) {
-      values.push(i);
-    }
-    return values;
-  }
-  
-  // Handle comma-separated values and ranges
   const values = new Set<number>();
   for (const part of spec.split(',')) {
-    if (part.includes('-')) {
-      const [start, end] = part.split('-').map(s => parseInt(s, 10));
-      if (isNaN(start) || isNaN(end)) {
-        throw new Error(`Invalid range in ${part}`);
-      }
-      for (let i = start; i <= end; i++) {
-        if (i >= min && i <= max) values.add(i);
-      }
-    } else {
-      const val = parseInt(part, 10);
-      if (!isNaN(val) && val >= min && val <= max) {
-        values.add(val);
-      }
-    }
+    if (!/^\d+(?:-\d+)?$/.test(part)) throw new Error('invalid_cron_field');
+    const [start, rawEnd] = part.split('-').map(Number);
+    const end = rawEnd ?? start;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start<min || end>max || start>end) throw new Error('invalid_cron_range');
+    for(let value=start;value<=end;value++)values.add(value);
   }
-  
-  return Array.from(values).sort((a, b) => a - b);
+  if (!values.size) throw new Error('empty_cron_field');
+  return [...values].sort((a,b)=>a-b);
 }
 
 function range(min: number, max: number): number[] {
