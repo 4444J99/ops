@@ -10,6 +10,10 @@ on:
         required: false
         type: string
         default: ''
+      resolve_cancelled_run:
+        required: false
+        type: string
+        default: ''
     secrets:
       CLOUDFLARE_API_TOKEN:
         required: true
@@ -78,6 +82,14 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: python3 scripts/release.py --apply
+      - name: Reconcile only the explicitly named cancelled poll
+        # The repair independently checks source, clocks, database and exact run
+        # custody. A stale readiness projection must not hide that repair path.
+        if: always() && !cancelled() && steps.validate_owner.outcome == 'success' && inputs.resolve_cancelled_run != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          OPS_RESOLVE_RUN: ${{ inputs.resolve_cancelled_run }}
+        run: python3 scripts/resolve_cancelled.py
       - name: Read per-run custody and product acknowledgement evidence
         # A stale runtime must not hide the evidence needed to repair it.
         # Validation is still required; failed preflight remains failed.
