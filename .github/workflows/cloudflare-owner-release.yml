@@ -14,6 +14,15 @@ on:
         required: false
         type: string
         default: ''
+      # In a reusable workflow the `github` context describes the CALLER, not
+      # this workflow. This input names the authorized credential-carrier
+      # caller explicitly (default: 4444J99/limen) instead of hiding that
+      # assumption in a hardcoded literal. The reusable workflow's own identity
+      # is verified by the pinned `uses:` ref plus the exact-revision check.
+      carrier_repository_id:
+        required: false
+        type: string
+        default: '1255213941'
     secrets:
       CLOUDFLARE_API_TOKEN:
         required: true
@@ -28,7 +37,10 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository_id == '1255213941' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    # Authorizes the credential-carrier caller (see the carrier_repository_id
+    # input); the reusable workflow's own code identity is verified by the
+    # exact-revision step below.
+    if: github.repository_id == inputs.carrier_repository_id && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:

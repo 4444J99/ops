@@ -4,7 +4,7 @@ export const MAX_INFLIGHT=4;
 export const MAX_DISPATCHES_PER_TICK=4;
 export interface Run {
  id:string; target:string; environment:string; scheduled_at:number; mode:'scheduled'|'drain';
- repository_id:number; service:string; account_ref:string; contract_version:number;
+ repository_id:number; service:string; capability:string; account_ref:string; contract_version:number;
  state:string; owner:string; generation:number; attempt:number; started_at:number;
  lease_until:number; deadline:number; source_sha:string;
 }
@@ -21,10 +21,10 @@ export class RunStore {
    const statements=targets.slice(offset,offset+8).map(({target:t,payload:p})=>{
     const mode=p.drainOnly?'drain':'scheduled';
     return this.db.prepare(`INSERT OR IGNORE INTO ops_runs
-      (id,target,environment,repository_id,service,account_ref,contract_version,scheduled_at,mode,state,created_at,source_sha,call_limit,deadline)
-      VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)`).bind(
+      (id,target,environment,repository_id,service,capability,account_ref,contract_version,scheduled_at,mode,state,created_at,source_sha,call_limit,deadline)
+      VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)`).bind(
        logicalRunKey(t,p.scheduledTime,mode),t.name,t.ownership.environment,
-       t.ownership.repositoryId,t.ownership.service,t.ownership.accountRef,t.ownership.contractVersion,
+       t.ownership.repositoryId,t.ownership.service,t.ownership.capability,t.ownership.accountRef,t.ownership.contractVersion,
        Math.floor(p.scheduledTime/60000)*60000,mode,now,sha,t.ownership.maxInvocationsPerDay,
        p.scheduledTime+t.ownership.freshnessMs);
    });
@@ -55,6 +55,7 @@ export class RunStore {
  async claim(run:Run,target:Target,now:number,sha:string):Promise<Run|null> {
   if(run.target!==target.name || run.environment!==target.ownership.environment
     || run.repository_id!==target.ownership.repositoryId || run.service!==target.ownership.service
+    || run.capability!==target.ownership.capability
     || run.account_ref!==target.ownership.accountRef || run.contract_version!==target.ownership.contractVersion)throw new Error('claim_scope_mismatch');
   const owner=crypto.randomUUID();
   try {

@@ -48,12 +48,27 @@ class ReleaseTests(unittest.TestCase):
   self.assertEqual(f.db.execute('SELECT COUNT(*) FROM ops_targets').fetchone()[0],1)
   row=f.db.execute('SELECT * FROM ops_control').fetchone()
   self.assertGreater(row['activate_after'],m.time.time()*1000+15*60000)
- def test_upload_failure_keeps_old_source_and_disables_new_admission(self):
+ def test_upload_failure_never_admits(self):
   f=Fake();f.failed=True
-  with self.assertRaisesRegex(m.SafeError,'upload_failed_control'):
+  with self.assertRaisesRegex(m.SafeError,'upload_failed'):
    m.apply(f,{'bindings':[]},f.files,{'targetStates':{}},b'new',[],'a'*40)
   self.assertEqual(f.files,{'index.js':b'old'})
-  self.assertEqual(f.db.execute('SELECT enabled FROM ops_control').fetchone()[0],0)
+  self.assertIsNone(f.db.execute('SELECT * FROM ops_control').fetchone())
+ def test_readback_failure_never_admits(self):
+  f=Fake()
+  original=f.upload
+  def tampered(settings,bundle,sha):
+   original(settings,bundle,sha)
+   f.configuration={'bindings':f.configuration['bindings']+[{'name':'UNEXPECTED','type':'kv'}]}
+  f.upload=tampered
+  with self.assertRaisesRegex(m.SafeError,'binding_or_clock_readback_failed'):
+   m.apply(f,{'bindings':[]},f.files,{'targetStates':{}},b'new',[],'a'*40)
+  self.assertIsNone(f.db.execute('SELECT * FROM ops_control').fetchone())
+ def test_successful_apply_records_admission(self):
+  f=Fake()
+  m.apply(f,{'bindings':[]},f.files,{'targetStates':{}},b'new',[],'a'*40)
+  row=f.db.execute("SELECT bundle_sha256 FROM ops_admissions WHERE source_sha=?",('a'*40,)).fetchone()
+  self.assertEqual(row['bundle_sha256'],m.digest(b'new'))
  def test_idempotent_same_release_does_not_reset_activation(self):
   f=Fake();m.apply(f,{'bindings':[]},f.files,{'targetStates':{}},b'new',[],'a'*40)
   before=f.db.execute('SELECT activate_after FROM ops_control').fetchone()[0]
@@ -142,5 +157,47 @@ class MetadataContainmentTests(unittest.TestCase):
   for name in m.DORMANT:
    with self.assertRaisesRegex(m.SafeError,'upload_target_refused'):client.upload({'bindings':[]},b'new','a'*40,name)
   with self.assertRaisesRegex(m.SafeError,'canonical_binding_removal_refused'):client.remove_product_bindings(m.WORKER,{'bindings':[]})
+
+class PredecessorTests(unittest.TestCase):
+ def recorded(self,sha,digest_value):
+  f=Fake();m.migrate(f)
+  f.db.execute("INSERT INTO ops_control VALUES('dispatcher',?,?,1)",(sha,0))
+  if digest_value is not None:
+   f.db.execute("INSERT INTO ops_admissions VALUES(?,?,?)",(sha,digest_value,0))
+  return f
+ def test_recorded_predecessor_accepts(self):
+  f=self.recorded('b'*40,m.digest(b'old-live'))
+  self.assertTrue(m.verify_predecessor(f,{'index.js':b'old-live'},'a'*40))
+ def test_recorded_predecessor_rejects_mismatch(self):
+  f=self.recorded('b'*40,m.digest(b'something-else'))
+  self.assertFalse(m.verify_predecessor(f,{'index.js':b'old-live'},'a'*40))
+ def test_rebuild_fallback_used_when_no_record(self):
+  f=self.recorded('b'*40,None)
+  with patch.object(m,'rebuild_predecessor_bundle',return_value=m.digest(b'old-live')):
+   self.assertTrue(m.verify_predecessor(f,{'index.js':b'old-live'},'a'*40))
+  with patch.object(m,'rebuild_predecessor_bundle',return_value=m.digest(b'something-else')):
+   self.assertFalse(m.verify_predecessor(f,{'index.js':b'old-live'},'a'*40))
+ def test_same_revision_mismatch_is_not_a_predecessor(self):
+  f=self.recorded('a'*40,None)
+  with patch.object(m,'rebuild_predecessor_bundle',side_effect=AssertionError('must not rebuild')):
+   self.assertFalse(m.verify_predecessor(f,{'index.js':b'other'},'a'*40))
+ def test_multimodule_live_is_not_a_predecessor(self):
+  f=self.recorded('b'*40,m.digest(b'old-live'))
+  self.assertFalse(m.verify_predecessor(f,{'index.js':b'old-live','extra.js':b'x'},'a'*40))
+
+class LiveBindingTests(unittest.TestCase):
+ def settings(self,*bindings):return {'bindings':list(bindings)}
+ def targets(self):return [{'binding':'EDGARFLASH'}]
+ def test_exact_expected_set_passes(self):
+  m.validate_live_bindings(self.settings({'name':'EDGARFLASH','type':'service'},{'name':'SCHED_DB','type':'d1'},{'name':'OP_SA_TOKEN','type':'secret_text'}),self.targets())
+ def test_unexpected_binding_refused(self):
+  with self.assertRaisesRegex(m.SafeError,'unexpected_live_binding'):
+   m.validate_live_bindings(self.settings({'name':'EDGARFLASH','type':'service'},{'name':'SCHED_DB','type':'d1'},{'name':'EXTRA','type':'kv'}),self.targets())
+ def test_unexpected_service_refused(self):
+  with self.assertRaisesRegex(m.SafeError,'live_capability_set_drift'):
+   m.validate_live_bindings(self.settings({'name':'EDGARFLASH','type':'service'},{'name':'OTHER','type':'service'},{'name':'SCHED_DB','type':'d1'}),self.targets())
+ def test_binding_type_drift_refused(self):
+  with self.assertRaisesRegex(m.SafeError,'live_binding_type_drift'):
+   m.validate_live_bindings(self.settings({'name':'EDGARFLASH','type':'service'},{'name':'SCHED_DB','type':'kv'}),self.targets())
 
 if __name__=='__main__':unittest.main()

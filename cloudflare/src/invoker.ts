@@ -47,7 +47,12 @@ export async function invokeTarget(env:Env,target:Target,payload:ScheduledPayloa
     method:'POST',headers,body:JSON.stringify(payload),signal:controller.signal});
    if(!response.ok) {
     await response.body?.cancel().catch(()=>{});
-    return {ok:false,rid,error:response.status===401||response.status===403?'authorization':`http_${response.status}`,outcome:'failed'} as RunResult;
+    // Only a definitive rejection (auth refused before any effect) is failed.
+    // Any other non-receipt outcome, especially a 5xx after dispatch, stays
+    // uncertain: the product may have run and the lock must not be released
+    // on an assumption.
+    const definitive=response.status===401||response.status===403;
+    return {ok:false,rid,error:definitive?'authorization':`http_${response.status}`,outcome:definitive?'failed':'uncertain'} as RunResult;
    }
    const body=await readBounded(response) as Record<string,unknown>;
    if(!body || typeof body!=='object' || typeof body.ok!=='boolean') return {ok:false,rid,error:'invalid_receipt',outcome:'uncertain'} as RunResult;
