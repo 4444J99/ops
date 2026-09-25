@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single-resource owner release: exact source, strict binding custody, additive SQL.
+"""Scheduler-family owner release: exact source, strict binding custody, additive SQL.
 
 Default operation is a read-only preflight. Apply requires both --apply and an
 exact OPS_APPLY_SOURCE match. No credentials, source, or raw settings are emitted.
@@ -12,6 +12,8 @@ from pathlib import Path
 API='https://api.cloudflare.com/client/v4'
 ROOT=Path(__file__).resolve().parents[1]
 WORKER='ops-scheduler-production'
+DORMANT={'ops-scheduler':'1af405f33c08cd93e95f542111633744ea8ebbf3592e8f8d9915bad12c02af5a',
+ 'ops-scheduler-staging':'07e0614e9b9b35841063dd260a64657c08362f6be76893c52879bd5705b1be83'}
 LEGACY='982048aebacde2af449ed0ff1cb26dcf4c4bb74a36abd7ca09f1f0871e6d5808'
 HELPERS={'finishline.mjs':'7efe3e34d925c63eb972fd5c4d42be9668919c03','diagnosis.mjs':'ce5ae0aa93be70a7c4c836a99d7870608fc66fd7'}
 CONTROL="SELECT source_sha,activate_after,enabled FROM ops_control WHERE id='dispatcher'"
@@ -45,7 +47,7 @@ class Client:
   readable=(path=='/accounts?per_page=50' or bool(re.fullmatch(r'/accounts/[a-f0-9]{32}/workers/subdomain',path)) or
     path in [base+'/workers/scripts/'+name+'/'+part for name in ('ops-scheduler','ops-scheduler-staging',WORKER)
              for part in ('settings','schedules','content/v2','deployments')])
-  writable=method=='PUT' and path==base+'/workers/scripts/'+WORKER+'?bindings_inherit=strict'
+  writable=method=='PUT' and path in ([base+'/workers/scripts/'+n+'?bindings_inherit=strict' for n in (WORKER,*DORMANT)]+[base+'/workers/scripts/'+n+'/schedules' for n in DORMANT])
   query=method=='POST' and self.db and path==base+'/d1/database/'+self.db+'/query'
   if not ((method=='GET' and readable) or writable or query):raise SafeError('release_endpoint_refused')
   req=urllib.request.Request(API+path,method=method,data=data,headers={
@@ -75,22 +77,27 @@ class Client:
   self.account=matches[0]
  def settings(self,name):return self.result(f'/accounts/{self.account}/workers/scripts/{name}/settings')
  def crons(self,name):return [r['cron'] for r in self.result(f'/accounts/{self.account}/workers/scripts/{name}/schedules')['schedules']]
- def source(self):return modules(*self.request(f'/accounts/{self.account}/workers/scripts/{WORKER}/content/v2',raw=True))
+ def source(self):return self.source_of(WORKER)
+ def source_of(self,name):return modules(*self.request(f'/accounts/{self.account}/workers/scripts/{name}/content/v2',raw=True))
+ def pause(self,name):
+  if name not in DORMANT:raise SafeError('canonical_clock_pause_refused')
+  self.request(f'/accounts/{self.account}/workers/scripts/{name}/schedules','PUT',b'[]')
  def sql(self,statement,params=()):
   result=self.request(f'/accounts/{self.account}/d1/database/{self.db}/query','POST',json.dumps({'sql':statement,'params':list(params)}).encode())['result']
   if len(result)!=1 or result[0].get('success') is not True:raise SafeError('sql_failed')
   return result[0].get('results',[])
- def upload(self,settings,bundle,sha):
+ def upload(self,settings,bundle,sha,name=WORKER):
+  if name not in (WORKER,*DORMANT):raise SafeError('upload_target_refused')
   metadata={k:v for k,v in settings.items() if k in ('compatibility_date','compatibility_flags','usage_model','logpush','observability','placement','tail_consumers','tags','limits') and v is not None}
-  metadata.update(main_module='index.js',bindings=[{'name':b['name'],'type':'inherit'} for b in settings['bindings'] if b['name'] not in ('OPS_CONTROLLER_ENV','OPS_RELEASE_SHA')]+[
-   {'name':'OPS_CONTROLLER_ENV','type':'plain_text','text':'production'},
+  metadata.update(main_module='index.js',bindings=[{'name':b['name'],'type':'inherit'} for b in settings['bindings'] if b['name'] not in ('OPS_CONTROLLER_ENV','OPS_RELEASE_SHA') and (name==WORKER or b.get('type')!='service')]+[
+   {'name':'OPS_CONTROLLER_ENV','type':'plain_text','text':'production' if name==WORKER else 'disabled'},
    {'name':'OPS_RELEASE_SHA','type':'plain_text','text':sha}],
    annotations={'workers/message':'ops owner release '+sha,'workers/tag':'ops-isolated-runs-v2'})
   boundary='ops-'+uuid.uuid4().hex;parts=[]
-  for name,kind,content in [('metadata','application/json',json.dumps(metadata).encode()),('index.js','application/javascript+module',bundle)]:
-   parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{name}"\r\nContent-Type: {kind}\r\n\r\n').encode()+content+b'\r\n')
+  for part_name,kind,content in [('metadata','application/json',json.dumps(metadata).encode()),('index.js','application/javascript+module',bundle)]:
+   parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{part_name}"; filename="{part_name}"\r\nContent-Type: {kind}\r\n\r\n').encode()+content+b'\r\n')
   parts.append(f'--{boundary}--\r\n'.encode())
-  self.request(f'/accounts/{self.account}/workers/scripts/{WORKER}?bindings_inherit=strict','PUT',b''.join(parts),'multipart/form-data; boundary='+boundary)
+  self.request(f'/accounts/{self.account}/workers/scripts/{name}?bindings_inherit=strict','PUT',b''.join(parts),'multipart/form-data; boundary='+boundary)
 def source_identity():
  sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
  expected=os.environ.get('OPS_SOURCE_SHA','')
@@ -105,7 +112,14 @@ def preflight(client,bundle,targets):
  elif digest(files['index.js'])==LEGACY and set(files)=={'index.js',*HELPERS} and all(blob(files[k])==v for k,v in HELPERS.items()):source='verified_incident_baseline'
  else:raise SafeError('live_source_drift')
  crons={n:client.crons(n) for n in ('ops-scheduler','ops-scheduler-staging',WORKER)}
- if crons[WORKER]!=['* * * * *'] or crons['ops-scheduler'] or crons['ops-scheduler-staging']:raise SafeError('duplicate_or_missing_live_clock')
+ if crons[WORKER]!=['* * * * *']:raise SafeError('canonical_live_clock_drift')
+ dormant={}
+ for name,expected in DORMANT.items():
+  saved=client.source_of(name);configuration=client.settings(name)
+  if saved!={'index.js':bundle} and not (set(saved)=={'index.js'} and digest(saved['index.js'])==expected):
+   raise SafeError('dormant_source_drift:'+name+':'+digest(saved['index.js']))
+  if crons[name] not in ([],['* * * * *']):raise SafeError('dormant_schedule_drift:'+name)
+  dormant[name]={'files':saved,'settings':configuration,'crons':crons[name]}
  bindings=settings.get('bindings',[])
  services={b['name']:b for b in bindings if b.get('type')=='service'}
  if set(services)!={t['binding'] for t in targets}:raise SafeError('live_capability_set_drift')
@@ -128,7 +142,25 @@ def preflight(client,bundle,targets):
   control=client.sql(CONTROL)
   waiting=bool(control and control[0].get('enabled')==1 and isinstance(control[0].get('activate_after'),(int,float)) and now<control[0]['activate_after']+120000)
  if not waiting and (isinstance(tick,bool) or not isinstance(tick,(int,float)) or not 0<=now-tick<600000):raise SafeError('scheduler_tick_stale')
- return settings,files,state,{'source_relation':source,'clocks_verified':True,'capabilities_verified':True,'legacy_bearer_binding_present':token_present,'product_targets':len(targets)}
+ return settings,files,state,dormant,{'source_relation':source,'canonical_clock_verified':True,'dormant_crons':{n:v['crons'] for n,v in dormant.items()},'dormant_service_bindings':{n:sum(b.get('type')=='service' for b in v['settings']['bindings']) for n,v in dormant.items()},'capabilities_verified':True,'legacy_bearer_binding_present':token_present,'product_targets':len(targets)}
+
+def contain(client,dormant,bundle,sha):
+ result={}
+ for name,item in dormant.items():
+  if name not in DORMANT:raise SafeError('containment_target_refused')
+  if client.source_of(name)!=item['files'] or client.settings(name)!=item['settings'] or client.crons(name)!=item['crons']:
+   raise SafeError('dormant_prewrite_drift')
+  if item['crons']:client.pause(name)
+  # A disabled copy has neither a clock nor product invocation bindings. Its
+  # original database, other bindings, secrets and historical versions remain.
+  client.upload(item['settings'],bundle,sha,name)
+  after=client.settings(name)
+  original={b['name']:b for b in item['settings']['bindings'] if b.get('type')!='service' and b['name'] not in ('OPS_CONTROLLER_ENV','OPS_RELEASE_SHA')}
+  kept={b['name']:b for b in after['bindings'] if b['name'] not in ('OPS_CONTROLLER_ENV','OPS_RELEASE_SHA')}
+  if client.source_of(name)!={'index.js':bundle} or client.crons(name) or original!=kept:
+   raise SafeError('dormant_readback_failed')
+  result[name]={'source_verified':True,'cron':[],'product_bindings':0,'existing_data_preserved':True}
+ return result
 
 def apply(client,settings,files,state,bundle,targets,sha):
  # Apply only complete statements from the reviewed additive migration.
@@ -178,8 +210,10 @@ def main():
   sha=source_identity();bundle=(ROOT/'dist/index.js').read_bytes();targets=json.loads((ROOT/'dist/admitted-targets.json').read_text())
   if opts.apply and os.environ.get('OPS_APPLY_SOURCE')!=sha:raise SafeError('apply_source_not_authorized')
   client=Client(os.environ.get('CLOUDFLARE_API_TOKEN',''))
-  settings,files,state,result=preflight(client,bundle,targets);report.update(result,source_sha=sha,bundle_sha256=digest(bundle))
-  if opts.apply:report.update(apply(client,settings,files,state,bundle,targets,sha))
+  settings,files,state,dormant,result=preflight(client,bundle,targets);report.update(result,source_sha=sha,bundle_sha256=digest(bundle))
+  if opts.apply:
+   report['dormant_readback']=contain(client,dormant,bundle,sha)
+   report.update(apply(client,settings,files,state,bundle,targets,sha))
   else:report['state']='PREFLIGHT_VERIFIED'
  except SafeError as error:report.update(state='ACTION_REQUIRED',error=str(error))
  except Exception:report.update(state='UNOBSERVED',error='release_failed')

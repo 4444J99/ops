@@ -28,7 +28,7 @@ class Fake:
 class ReleaseTests(unittest.TestCase):
  def test_request_allowlist_rejects_other_worker_or_resource_mutation(self):
   client=m.Client('test-token');client.account='a'*32;client.db='b'*36
-  for path,method in [('/accounts','POST'),('/accounts/'+client.account+'/workers/scripts/edgarflash','PUT'),('/accounts/'+client.account+'/workers/scripts/ops-scheduler-staging/schedules','PUT')]:
+  for path,method in [('/accounts','POST'),('/accounts/'+client.account+'/workers/scripts/edgarflash','PUT'),('/accounts/'+client.account+'/workers/scripts/ops-scheduler-production/schedules','PUT')]:
    with self.assertRaisesRegex(m.SafeError,'release_endpoint_refused'):client.request(path,method)
  def test_missing_credential(self):
   with self.assertRaisesRegex(m.SafeError,'credential_missing'):m.Client('')
@@ -71,4 +71,44 @@ class ReleaseTests(unittest.TestCase):
   with patch.object(m,'source_identity',side_effect=RuntimeError('private-secret')),patch('sys.argv',['release.py']),patch('sys.stdout',new_callable=io.StringIO) as out,patch.dict(m.os.environ,{},clear=True):
    self.assertEqual(m.main(),1)
    self.assertNotIn('private-secret',out.getvalue());self.assertEqual(json.loads(out.getvalue())['state'],'UNOBSERVED')
+
+class DormantTests(unittest.TestCase):
+ def test_canonical_clock_cannot_be_paused(self):
+  client=m.Client('test-only')
+  with self.assertRaisesRegex(m.SafeError,'canonical_clock_pause_refused'):client.pause(m.WORKER)
+ def test_containment_preserves_data_bindings_and_removes_only_product_capabilities(self):
+  class Carrier:
+   def __init__(self):
+    self.files={'index.js':b'old'};self.cron=['* * * * *']
+    self.config={'bindings':[{'name':'SCHED_DB','type':'d1','database_id':'test-only'}, {'name':'PRODUCT','type':'service','service':'fixture'}]}
+   def source_of(self,name):return self.files
+   def settings(self,name):return self.config
+   def crons(self,name):return self.cron
+   def pause(self,name):self.cron=[]
+   def upload(self,settings,bundle,sha,name):
+    self.files={'index.js':bundle};self.config={'bindings':[b for b in settings['bindings'] if b['type']!='service']}
+  client=Carrier();name='ops-scheduler-staging'
+  snapshot={name:{'files':client.files,'settings':client.config,'crons':client.cron}}
+  result=m.contain(client,snapshot,b'new','a'*40)
+  self.assertEqual(result[name]['product_bindings'],0)
+  self.assertEqual(client.config['bindings'][0]['name'],'SCHED_DB')
+ def test_dormant_drift_is_refused_before_any_write(self):
+  class Carrier:
+   def source_of(self,name):return {'index.js':b'changed'}
+   def pause(self,name):raise AssertionError('must not mutate')
+  with self.assertRaisesRegex(m.SafeError,'dormant_prewrite_drift'):
+   m.contain(Carrier(),{'ops-scheduler':{'files':{'index.js':b'old'},'settings':{},'crons':[]}},b'new','a'*40)
+
+class UploadTests(unittest.TestCase):
+ def test_upload_names_worker_not_last_multipart_file(self):
+  client=m.Client('test-only');client.account='a'*32
+  settings={'bindings':[{'name':'DB','type':'d1','database_id':'fixture'},{'name':'PRODUCT','type':'service','service':'fixture'}]}
+  for name in (m.WORKER,*m.DORMANT):
+   with patch.object(client,'request',return_value={}) as send:
+    client.upload(settings,b'export default {}','a'*40,name)
+   self.assertTrue(send.call_args.args[0].endswith('/'+name+'?bindings_inherit=strict'))
+   raw=send.call_args.args[2]
+   self.assertIn(b'name="index.js"',raw)
+   self.assertEqual(b'"name": "PRODUCT"' in raw,name==m.WORKER)
+
 if __name__=='__main__':unittest.main()
