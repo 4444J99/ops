@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Scheduler-family owner release: exact source, strict binding custody, additive SQL.
-
-Default operation is a read-only preflight. Apply requires both --apply and an
-exact OPS_APPLY_SOURCE match. No credentials, source, or raw settings are emitted.
-"""
+"""Scheduler-family owner release; exact source, custody, additive SQL, safe receipts."""
 from __future__ import annotations
 import argparse, hashlib, json, math, os, re, sqlite3, subprocess, sys, time, urllib.error, urllib.request, uuid
 from email import policy
@@ -26,6 +22,51 @@ def digest(raw):return hashlib.sha256(raw).hexdigest()
 def decode(raw):
  try:return json.loads(raw)
  except Exception:raise SafeError('invalid_provider_json') from None
+
+def transport_sql(statement):
+ """One physical line outside quoted text for the provider statement splitter."""
+ out=[];i=0;quote=None
+ while i<len(statement):
+  char=statement[i]
+  if quote:
+   out.append(char)
+   if char==quote:
+    if i+1<len(statement) and statement[i+1]==quote:out.append(statement[i+1]);i+=1
+    else:quote=None
+  elif statement.startswith('--',i):
+   end=statement.find('\n',i);i=len(statement) if end<0 else end
+   if not out or out[-1]!=' ':out.append(' ')
+   continue
+  elif statement.startswith('/*',i):
+   end=statement.find('*/',i+2)
+   if end<0:raise SafeError('unterminated_sql_comment')
+   i=end+2
+   if not out or out[-1]!=' ':out.append(' ')
+   continue
+  elif char in ("'",'"','`','['):
+   quote=']' if char=='[' else char;out.append(char)
+  elif char.isspace():
+   if not out or out[-1]!=' ':out.append(' ')
+  else:out.append(char)
+  i+=1
+ if quote:raise SafeError('unterminated_sql_quote')
+ return ''.join(out).strip()
+
+def provider_failure(status,raw):
+ """Project fixed categories/numeric codes only; never echo vendor bodies."""
+ try:
+  body=json.loads(raw) if len(raw)<=65536 else {}
+  errors=body.get('errors',[]) if isinstance(body,dict) else []
+  messages=' '.join(str(e.get('message','')) for e in errors if isinstance(e,dict))
+  codes=sorted({e['code'] for e in errors if isinstance(e,dict) and isinstance(e.get('code'),int) and not isinstance(e['code'],bool) and 0<=e['code']<=999999})
+ except Exception:messages='';codes=[]
+ categories=[('incomplete_input',r'incomplete input'),('missing_column',r'no such column'),
+  ('missing_table',r'no such table'),('syntax',r'syntax error'),('not_authorized',r'not authorized|unauthorized|permission'),
+  ('constraint',r'constraint|unique|not null'),('too_many_parameters',r'too many (?:sql variables|parameters)'),
+  ('transaction',r'transaction|savepoint'),('quota',r'quota|limit exceeded|too many requests')]
+ category=next((name for name,pattern in categories if re.search(pattern,messages,re.I)),'unclassified')
+ return 'provider_http_'+str(status)+':'+category+':codes_'+','.join(map(str,codes))
+
 def modules(kind,raw):
  if not kind.lower().startswith('multipart/'):return {'index.js':raw}
  msg=BytesParser(policy=policy.default).parsebytes(('Content-Type: '+kind+'\r\n\r\n').encode()+raw)
@@ -54,7 +95,7 @@ class Client:
   try:
    with OPENER.open(req,timeout=45) as response:
     content=response.read(2000001);content_type=response.headers.get('Content-Type','')
-  except urllib.error.HTTPError as error:raise SafeError('provider_http_'+str(error.code)) from None
+  except urllib.error.HTTPError as error:raise SafeError(provider_failure(error.code,error.read(65537))) from None
   except (urllib.error.URLError,TimeoutError):raise SafeError('provider_network_failure') from None
   if len(content)>2000000:raise SafeError('provider_response_too_large')
   if raw:return content_type,content
@@ -89,9 +130,12 @@ class Client:
     +json.dumps(payload).encode()+f'\r\n--{boundary}--\r\n'.encode())
   self.request(f'/accounts/{self.account}/workers/scripts/{name}/settings','PATCH',data,'multipart/form-data; boundary='+boundary)
  def sql(self,statement,params=()):
-  result=self.request(f'/accounts/{self.account}/d1/database/{self.db}/query','POST',json.dumps({'sql':statement,'params':list(params)}).encode())['result']
-  if len(result)!=1 or result[0].get('success') is not True:raise SafeError('sql_failed')
-  return result[0].get('results',[])
+  try:
+   result=self.request(f'/accounts/{self.account}/d1/database/{self.db}/query','POST',json.dumps({'sql':transport_sql(statement),'params':list(params)}).encode())['result']
+   if len(result)!=1 or result[0].get('success') is not True:raise SafeError('sql_failed')
+   return result[0].get('results',[])
+  except SafeError as error:
+   raise SafeError(str(error)+':sql_'+digest(statement.encode())[:16]) from None
  def upload(self,settings,bundle,sha,name=WORKER):
   if name!=WORKER:raise SafeError('upload_target_refused')
   metadata={k:v for k,v in settings.items() if k in ('compatibility_date','compatibility_flags','usage_model','logpush','observability','placement','tail_consumers','tags','limits') and v is not None}
