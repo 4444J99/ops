@@ -57,15 +57,14 @@ END;
 CREATE TRIGGER IF NOT EXISTS ops_admit_claim BEFORE UPDATE OF state ON ops_runs
 WHEN NEW.state='running' AND OLD.state='pending'
 BEGIN
-  -- Charge reservations even if a process dies. Ambiguous work is never refunded.
   INSERT OR IGNORE INTO ops_daily_dispatch(day,scope) VALUES(date(NEW.started_at/1000,'unixepoch'), NEW.target);
   INSERT OR IGNORE INTO ops_daily_dispatch(day,scope) VALUES(date(NEW.started_at/1000,'unixepoch'), '*');
   UPDATE ops_daily_dispatch SET calls=calls+1
     WHERE day=date(NEW.started_at/1000,'unixepoch') AND scope=NEW.target AND calls<NEW.call_limit;
-  SELECT CASE WHEN changes()<>1 THEN RAISE(ABORT,'target_dispatch_budget_exhausted') END;
+  SELECT (CASE WHEN changes()<>1 THEN RAISE(ABORT,'target_dispatch_budget_exhausted') END);
   UPDATE ops_daily_dispatch SET calls=calls+1
     WHERE day=date(NEW.started_at/1000,'unixepoch') AND scope='*' AND calls<2000;
-  SELECT CASE WHEN changes()<>1 THEN RAISE(ABORT,'fleet_dispatch_budget_exhausted') END;
+  SELECT (CASE WHEN changes()<>1 THEN RAISE(ABORT,'fleet_dispatch_budget_exhausted') END);
 END;
 CREATE TRIGGER IF NOT EXISTS ops_record_start AFTER UPDATE OF state ON ops_runs
 WHEN NEW.state='running' AND OLD.state='pending'
@@ -81,12 +80,12 @@ WHEN OLD.state IN('running','uncertain','accepted') AND NEW.state IN('completed'
 BEGIN
   INSERT INTO bookends(id,date,target,phase,status,timestamp,duration_ms)
     VALUES(NEW.id||':end:'||NEW.generation,date(NEW.finished_at/1000,'unixepoch'),NEW.target,
-      'end',CASE WHEN NEW.state='completed' THEN 'success' ELSE 'failure' END,
+      'end',(CASE WHEN NEW.state='completed' THEN 'success' ELSE 'failure' END),
       strftime('%Y-%m-%dT%H:%M:%fZ',NEW.finished_at/1000.0,'unixepoch'),NEW.finished_at-NEW.started_at);
-  UPDATE ops_targets SET last_completed=CASE WHEN NEW.state='completed' THEN NEW.finished_at ELSE last_completed END,
-    last_status=CASE WHEN NEW.state='completed' THEN 'success' ELSE 'failure' END,
-    consecutive_failures=CASE WHEN NEW.state='completed' THEN 0 ELSE consecutive_failures+1 END,
-    next_allowed=CASE WHEN NEW.state='completed' THEN 0 ELSE NEW.finished_at+MIN(1800000,30000*(consecutive_failures+1)) END,
+  UPDATE ops_targets SET last_completed=(CASE WHEN NEW.state='completed' THEN NEW.finished_at ELSE last_completed END),
+    last_status=(CASE WHEN NEW.state='completed' THEN 'success' ELSE 'failure' END),
+    consecutive_failures=(CASE WHEN NEW.state='completed' THEN 0 ELSE consecutive_failures+1 END),
+    next_allowed=(CASE WHEN NEW.state='completed' THEN 0 ELSE NEW.finished_at+MIN(1800000,30000*(consecutive_failures+1)) END),
     failure_code=NEW.error_code
     WHERE target=NEW.target AND generation=NEW.generation;
 END;
@@ -96,7 +95,6 @@ BEGIN
   UPDATE ops_targets SET last_status=NEW.state, failure_code=NEW.error_code
     WHERE target=NEW.target AND generation=NEW.generation;
 END;
--- Existing witness compatibility is an atomic projection, never the claim authority.
 CREATE TRIGGER IF NOT EXISTS ops_compat_projection AFTER UPDATE ON ops_targets
 BEGIN
   INSERT OR IGNORE INTO scheduler_state(id,payload) VALUES('scheduler:state','{"lastTick":0,"targetStates":{}}');
