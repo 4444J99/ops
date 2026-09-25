@@ -12,12 +12,11 @@ export interface Ownership {
   accountRef: string;
   service: string;
   capability: string;
-  authorization: 'named-entrypoint' | 'legacy-bearer';
+  authorization: 'named-entrypoint' | 'legacy-default';
   contractVersion: 1;
   maxDurationMs: number;
   maxInvocationsPerDay: number;
   freshnessMs: number;
-  // Legacy exemptions preserve existing traffic, but never assert measured costs.
   resourceBudget: {state:'unmeasured'; issue:string} | {state:'bounded'; perInvocation:Cost; perDay:Cost};
 }
 export interface RegisteredTarget {
@@ -41,7 +40,7 @@ export function validateTargets(targets: readonly RegisteredTarget[]): void {
     parseCron(t.schedule); if(t.continuationSchedule)parseCron(t.continuationSchedule);
     if (!NAME.test(t.name) || !/^[A-Z][A-Z0-9_]*$/.test(t.binding) || names.has(t.name) || bindings.has(t.binding)) throw new Error('duplicate_or_invalid_target');
     if (!o || !positive(o.repositoryId) || !REPO.test(o.repository) || !NAME.test(o.service) || !NAME.test(o.accountRef) || !['production','staging'].includes(o.environment)) throw new Error('invalid_owner');
-    if (o.contractVersion!==1 || !['named-entrypoint','legacy-bearer'].includes(o.authorization) || !/^[A-Za-z][A-Za-z0-9_]*$/.test(o.capability)) throw new Error('invalid_capability');
+    if (o.contractVersion!==1 || !['named-entrypoint','legacy-default'].includes(o.authorization) || !/^[A-Za-z][A-Za-z0-9_]*$/.test(o.capability)) throw new Error('invalid_capability');
     if (o.authorization==='named-entrypoint' && o.capability==='default') throw new Error('named_capability_required');
     if (!positive(o.maxDurationMs) || o.maxDurationMs>300000 || !positive(o.maxInvocationsPerDay) || o.maxInvocationsPerDay>20000 || !positive(o.freshnessMs)) throw new Error('invalid_execution_budget');
     const resource=`${o.accountRef}/worker/${o.service}`;
