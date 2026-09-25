@@ -84,7 +84,9 @@ jobs:
         if: always() && !cancelled() && steps.validate_owner.outcome == 'success'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: python3 scripts/runtime_evidence.py
+        run: |
+          python3 scripts/runtime_evidence.py
+          python3 scripts/uncertain_logs.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
