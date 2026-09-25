@@ -1,0 +1,50 @@
+name: Shared operations contract
+
+on:
+  pull_request:
+    paths: ['cloudflare/**', '.github/workflows/cloudflare-contract.yml']
+  push:
+    branches: [main]
+    paths: ['cloudflare/**', '.github/workflows/cloudflare-contract.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-operations-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: cloudflare
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Build without provider credentials
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: npx wrangler deploy --dry-run --outdir dist
+      - name: Preserve exact test inputs and build evidence
+        if: always()
+        run: |
+          git rev-parse HEAD > SOURCE_COMMIT.txt
+          tar -czf "${RUNNER_TEMP}/ops-contract-inputs.tgz" src test migrations package.json package-lock.json tsconfig.json vitest.config.ts wrangler.toml wrangler-no-cron.toml SOURCE_COMMIT.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ops-contract-inputs
+          path: ${{ runner.temp }}/ops-contract-inputs.tgz
+          retention-days: 3
+          if-no-files-found: error
