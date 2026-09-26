@@ -1,10 +1,12 @@
 import { parseCron } from './cron-matcher';
 /** Resource admission. Pure data validation; never grants provider authority. */
 export type Environment = 'production' | 'staging' | 'disabled';
-export type Metric = 'kvRead' | 'kvWrite' | 'kvList' | 'kvDelete' | 'd1Read' | 'd1Write';
+export type Metric = 'kvRead' | 'kvWrite' | 'kvList' | 'kvDelete' | 'd1Read' | 'd1Write' | 'requests' | 'cpuMs';
 export type Cost = Record<Metric, number>;
-export const METRICS: Metric[] = ['kvRead', 'kvWrite', 'kvList', 'kvDelete', 'd1Read', 'd1Write'];
-export const FREE_ALLOWANCE: Cost = {kvRead:100000, kvWrite:1000, kvList:1000, kvDelete:1000, d1Read:5000000, d1Write:100000};
+export const METRICS: Metric[] = ['kvRead', 'kvWrite', 'kvList', 'kvDelete', 'd1Read', 'd1Write', 'requests', 'cpuMs'];
+// Workers free-plan execution budget: 100,000 requests/day; cpuMs derives from
+// the 10 ms CPU limit per request applied across the request allowance.
+export const FREE_ALLOWANCE: Cost = {kvRead:100000, kvWrite:1000, kvList:1000, kvDelete:1000, d1Read:5000000, d1Write:100000, requests:100000, cpuMs:1000000};
 export interface Ownership {
   repositoryId: number;
   repository: string;

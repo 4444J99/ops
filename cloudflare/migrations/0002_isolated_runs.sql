@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS ops_runs (
   deadline INTEGER NOT NULL,
   error_code TEXT,
   completed_items INTEGER,
-  pending_items INTEGER
+  pending_items INTEGER,
+  capability TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ops_one_inflight_per_target ON ops_runs(target)
   WHERE state IN('running','uncertain','accepted');

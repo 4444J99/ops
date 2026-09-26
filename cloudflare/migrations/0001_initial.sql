@@ -1,4 +1,4 @@
-CREATE TABLE bookends (
+CREATE TABLE IF NOT EXISTS bookends (
   id TEXT PRIMARY KEY,
   date TEXT NOT NULL,
   target TEXT NOT NULL,
@@ -8,9 +8,9 @@ CREATE TABLE bookends (
   duration_ms INTEGER
 );
 
-CREATE INDEX idx_bookends_date ON bookends(date);
+CREATE INDEX IF NOT EXISTS idx_bookends_date ON bookends(date);
 
-CREATE TABLE scheduler_state (
+CREATE TABLE IF NOT EXISTS scheduler_state (
   id TEXT PRIMARY KEY,
   payload TEXT NOT NULL
 );

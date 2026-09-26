@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Scheduler-family owner release; exact source, custody, additive SQL, safe receipts."""
 from __future__ import annotations
-import argparse, hashlib, json, math, os, re, sqlite3, subprocess, sys, time, urllib.error, urllib.request, uuid
+import argparse, hashlib, json, math, os, re, sqlite3, subprocess, sys, tempfile, time, urllib.error, urllib.request, uuid
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
@@ -156,10 +156,75 @@ def source_identity():
  if remote!='https://github.com/4444J99/ops':raise SafeError('source_repository_mismatch')
  return sha
 
-def preflight(client,bundle,targets):
+MIGRATIONS=('migrations/0001_initial.sql','migrations/0002_isolated_runs.sql','migrations/0003_admission_provenance.sql')
+def migrate(client):
+ for name in MIGRATIONS:
+  statement=''
+  for line in (ROOT/name).read_text().splitlines(True):
+   statement+=line
+   if sqlite3.complete_statement(statement):client.sql(statement);statement=''
+  if statement.strip():raise SafeError('incomplete_migration_statement:'+name)
+ # Databases created before the capability column existed gain it here; the
+ # probe keeps this idempotent across repeated releases.
+ try:client.sql('SELECT capability FROM ops_runs LIMIT 0')
+ except Exception:client.sql('ALTER TABLE ops_runs ADD COLUMN capability TEXT')
+
+def recorded_bundle_digest(client,admitted_sha):
+ """Bundle digest recorded when a revision was admitted; None when unknown."""
+ try:rows=client.sql('SELECT bundle_sha256 FROM ops_admissions WHERE source_sha=?',(admitted_sha,))
+ except SafeError:return None
+ return rows[0]['bundle_sha256'] if rows else None
+
+def rebuild_predecessor_bundle(admitted_sha):
+ """Rebuild the bundle for a previously admitted revision in an isolated worktree."""
+ if not re.fullmatch('[a-f0-9]{40}',admitted_sha):raise SafeError('invalid_admitted_revision')
+ tmp=Path(os.environ.get('RUNNER_TEMP') or tempfile.gettempdir())/('ops-predecessor-'+admitted_sha[:12])
+ run=subprocess.run
+ try:
+  run(['git','-C',str(ROOT),'worktree','remove','--force',str(tmp)],capture_output=True,timeout=120)
+  run(['git','-C',str(ROOT),'worktree','add','--detach',str(tmp),admitted_sha],check=True,capture_output=True,timeout=120)
+  env={**os.environ,'WRANGLER_SEND_METRICS':'false'}
+  run(['npm','ci','--no-audit','--no-fund'],cwd=tmp/'cloudflare',check=True,capture_output=True,timeout=600,env=env)
+  run(['npm','run','build'],cwd=tmp/'cloudflare',check=True,capture_output=True,timeout=600,env=env)
+  return digest((tmp/'cloudflare'/'dist'/'index.js').read_bytes())
+ except (subprocess.CalledProcessError,subprocess.TimeoutExpired,OSError) as error:
+  raise SafeError('predecessor_rebuild_failed') from error
+ finally:
+  run(['git','-C',str(ROOT),'worktree','remove','--force',str(tmp)],capture_output=True,timeout=120)
+
+def verify_predecessor(client,files,sha):
+ """Accept the live artifact when it matches the previously admitted revision."""
+ if set(files)!={'index.js'}:return False
+ control=client.sql(CONTROL)
+ if not control:return False
+ admitted=control[0].get('source_sha','')
+ if not re.fullmatch('[a-f0-9]{40}',admitted) or admitted==sha:return False
+ live=digest(files['index.js'])
+ recorded=recorded_bundle_digest(client,admitted)
+ if recorded is not None:return live==recorded
+ # Bootstrap for databases predating admission records: rebuild the admitted
+ # revision and compare, instead of trusting an unverified artifact.
+ return live==rebuild_predecessor_bundle(admitted)
+
+def validate_live_bindings(settings,targets):
+ """Refuse unexpected live bindings instead of inheriting them on upload."""
+ bindings=settings.get('bindings',[])
+ services={b['name']:b for b in bindings if isinstance(b,dict) and b.get('type')=='service'}
+ if set(services)!={t['binding'] for t in targets}:raise SafeError('live_capability_set_drift')
+ expected={t['binding']:'service' for t in targets}
+ expected['SCHED_DB']='d1'
+ live={b['name']:b.get('type') for b in bindings if isinstance(b,dict) and isinstance(b.get('name'),str)}
+ for name in ('OP_SA_TOKEN','OPS_CONTROLLER_ENV','OPS_RELEASE_SHA'):
+  if name in live:expected[name]=live[name]
+ if set(live)!=set(expected):raise SafeError('unexpected_live_binding')
+ if any(live[name]!=expected[name] for name in expected):raise SafeError('live_binding_type_drift')
+ return services
+
+def preflight(client,bundle,targets,sha):
  client.resolve_account();settings=client.settings(WORKER);files=client.source()
  if files=={'index.js':bundle}:source='same_artifact'
  elif digest(files['index.js'])==LEGACY and set(files)=={'index.js',*HELPERS} and all(blob(files[k])==v for k,v in HELPERS.items()):source='verified_incident_baseline'
+ elif verify_predecessor(client,files,sha):source='verified_predecessor'
  else:raise SafeError('live_source_drift')
  crons={n:client.crons(n) for n in ('ops-scheduler','ops-scheduler-staging',WORKER)}
  if crons[WORKER]!=['* * * * *']:raise SafeError('canonical_live_clock_drift')
@@ -170,8 +235,7 @@ def preflight(client,bundle,targets):
   if crons[name] not in ([],['* * * * *']):raise SafeError('dormant_schedule_drift:'+name)
   dormant[name]={'files':saved,'settings':configuration,'crons':crons[name]}
  bindings=settings.get('bindings',[])
- services={b['name']:b for b in bindings if b.get('type')=='service'}
- if set(services)!={t['binding'] for t in targets}:raise SafeError('live_capability_set_drift')
+ services=validate_live_bindings(settings,targets)
  for t in targets:
   b=services[t['binding']];o=t['ownership']
   if b.get('service')!=o['service'] or (b.get('entrypoint') or 'default')!=o['capability']:raise SafeError('live_capability_identity_drift')
@@ -223,11 +287,12 @@ def contain(client,dormant,bundle,sha):
  return result
 
 def apply(client,settings,files,state,bundle,targets,sha):
- statement=''
- for line in (ROOT/'migrations/0002_isolated_runs.sql').read_text().splitlines(True):
-  statement+=line
-  if sqlite3.complete_statement(statement):client.sql(statement);statement=''
- if statement.strip():raise SafeError('incomplete_migration_statement')
+ migrate(client)
+ # Backfill capability custody for runs queued before the column existed.
+ for t in targets:
+  capability=(t.get('ownership') or {}).get('capability')
+  if isinstance(capability,str) and capability and isinstance(t.get('name'),str):
+   client.sql('UPDATE ops_runs SET capability=? WHERE target=? AND capability IS NULL',(capability,t['name']))
  for t in targets:
   old=state.get('targetStates',{}).get(t['name'],{})
   values=[old.get('lastInvokedAt',0),old.get('lastCompletedAt',0),old.get('consecutiveFailures',0)]
@@ -242,20 +307,17 @@ def apply(client,settings,files,state,bundle,targets,sha):
   return {'state':'ALREADY_DEPLOYED','activate_after':current[0]['activate_after']}
  if client.source()!=files or client.settings(WORKER)!=settings:raise SafeError('preupload_drift')
  activate=int(time.time()*1000)+16*60000
- client.sql(INSTALL,(sha,activate))
- try:
-  client.upload(settings,bundle,sha)
- except Exception:
-  if client.source()==files:
-   previous=current[0] if current else {'source_sha':sha,'activate_after':activate,'enabled':0}
-   client.sql('UPDATE ops_control SET source_sha=?,activate_after=?,enabled=? WHERE id=\'dispatcher\' AND source_sha=? AND activate_after=?',
-     (previous['source_sha'],previous['activate_after'],previous['enabled'],sha,activate))
-  raise SafeError('upload_failed_control_reconciled_if_old_source_verified') from None
+ # Admission is granted only after the upload and every post-upload readback
+ # pass: a failed verification can never leave a dispatchable worker behind.
+ try:client.upload(settings,bundle,sha)
+ except Exception:raise SafeError('upload_failed') from None
  if client.source()!={'index.js':bundle}:raise SafeError('source_readback_failed')
  after=client.settings(WORKER)
  before={b['name']:b for b in settings['bindings'] if b['name'] not in ('OPS_CONTROLLER_ENV','OPS_RELEASE_SHA')}
  now={b['name']:b for b in after['bindings'] if b['name'] not in ('OPS_CONTROLLER_ENV','OPS_RELEASE_SHA')}
  if before!=now or client.crons(WORKER)!=['* * * * *']:raise SafeError('binding_or_clock_readback_failed')
+ client.sql('INSERT OR REPLACE INTO ops_admissions(source_sha,bundle_sha256,admitted_at) VALUES(?,?,?)',(sha,digest(bundle),int(time.time()*1000)))
+ client.sql(INSTALL,(sha,activate))
  return {'state':'DEPLOYED_AWAITING_ACTIVATION','activate_after':activate,'source_verified':True,'bindings_preserved':True}
 
 def main():
@@ -265,7 +327,7 @@ def main():
   sha=source_identity();bundle=(ROOT/'dist/index.js').read_bytes();targets=json.loads((ROOT/'dist/admitted-targets.json').read_text())
   if opts.apply and os.environ.get('OPS_APPLY_SOURCE')!=sha:raise SafeError('apply_source_not_authorized')
   client=Client(os.environ.get('CLOUDFLARE_API_TOKEN',''))
-  settings,files,state,dormant,result=preflight(client,bundle,targets);report.update(result,source_sha=sha,bundle_sha256=digest(bundle))
+  settings,files,state,dormant,result=preflight(client,bundle,targets,sha);report.update(result,source_sha=sha,bundle_sha256=digest(bundle))
   if opts.apply:
    report['dormant_readback']=contain(client,dormant,bundle,sha)
    report.update(apply(client,settings,files,state,bundle,targets,sha))

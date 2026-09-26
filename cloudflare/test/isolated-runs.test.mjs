@@ -110,11 +110,11 @@ test('a fleet reservation failure rolls back the preceding target reservation',a
  assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM ops_daily_dispatch WHERE scope='edgarflash'").get().n,0);
  assert.equal(f.sql.prepare("SELECT state FROM ops_runs").get().state,'pending');
 });
-test('healthy and failed target state updates do not overwrite each other',async()=>{
+test('healthy and uncertain target state updates do not overwrite each other',async()=>{
  const f=fixture();for(const t of SCHEDULE_MANIFEST)t.active=['edgarflash','bountyscope'].includes(t.name);
  f.env.BOUNTYSCOPE.fetch=async()=>new Response('',{status:503});await tick({scheduledTime:NOW},f.env);
  const state=JSON.parse(f.sql.prepare("SELECT payload FROM scheduler_state WHERE id='scheduler:state'").get().payload);
- assert.equal(state.targetStates.edgarflash.lastStatus,'success');assert.equal(state.targetStates.bountyscope.lastStatus,'failure');
+ assert.equal(state.targetStates.edgarflash.lastStatus,'success');assert.equal(state.targetStates.bountyscope.lastStatus,'uncertain');
 });
 test('accepted is not completed and keeps its execution lock',async()=>{
  const f=fixture();only(f);f.env.EDGARFLASH.fetch=async()=>Response.json({ok:true,state:'accepted'});await tick({scheduledTime:NOW},f.env);

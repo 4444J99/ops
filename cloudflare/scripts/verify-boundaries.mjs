@@ -35,12 +35,24 @@ for(const t of targets){
  assert.equal(binding[0].entrypoint??'default',t.ownership.capability,'named ingress lost');
 }
 // These are explicitly grandfathered identities, not a second schedule registry.
+// Each exemption is bound to the complete immutable resource-and-capability
+// identity (repository, target, account, service, environment, capability):
+// editing any of those fields re-admits the target through new-registration
+// validation instead of silently keeping the exemption.
 // New callers require all-account allocation evidence; unknown old budgets may
 // not be used to manufacture spare capacity for a newly admitted product.
-const legacy=new Set(['1228974136:bountyscope','1228965461:edgarflash','1228979753:trendpulse','1229016238:vulnpulse','1380697675:ucc-staging','1380697675:ucc-production']);
-const added=targets.filter(t=>!legacy.has(`${t.ownership.repositoryId}:${t.name}`));
+const legacyKey=(t)=>`${t.ownership.repositoryId}:${t.name}:${t.ownership.accountRef}:${t.ownership.service}:${t.ownership.environment}:${t.ownership.capability}`;
+const legacy=new Set([
+ '1228974136:bountyscope:primary-cloudflare:bountyscope:production:default',
+ '1228965461:edgarflash:primary-cloudflare:edgarflash:production:default',
+ '1228979753:trendpulse:primary-cloudflare:trendpulse:production:default',
+ '1229016238:vulnpulse:primary-cloudflare:vulnpulse:production:default',
+ '1380697675:ucc-staging:primary-cloudflare:ucc-mca-edge-staging:staging:KvIncidentScheduledIngress',
+ '1380697675:ucc-production:primary-cloudflare:ucc-mca-edge-production:production:default',
+]);
+const added=targets.filter(t=>!legacy.has(legacyKey(t)));
 for(const t of added)validateNewRegistration(t);
-if(added.length)validateAllocation(targets,FREE_ALLOWANCE,{kvRead:0,kvWrite:0,kvList:0,kvDelete:0,d1Read:100000,d1Write:20000});
+if(added.length)validateAllocation(targets,FREE_ALLOWANCE,{kvRead:0,kvWrite:0,kvList:0,kvDelete:0,d1Read:100000,d1Write:20000,requests:1440,cpuMs:0});
 assert.ok(targets.reduce((n,t)=>n+t.ownership.maxInvocationsPerDay,0)<=2000,'fleet dispatch reservations exceed runtime capacity');
 if(process.argv.includes('--emit'))writeFileSync(resolve(root,'dist/admitted-targets.json'),JSON.stringify(targets,null,2));
 console.log(JSON.stringify({validatedTargets:targets.length,newAdmissions:added.length,productionControllers:1,dormantCapabilityBindings:0,unmeasuredLegacyBudgets:targets.filter(t=>t.ownership.resourceBudget.state==='unmeasured').length}));
