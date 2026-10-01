@@ -233,6 +233,47 @@ test('current lower admission allowance applies to old queued work',async()=>{
  f.sql.prepare("INSERT INTO ops_daily_dispatch VALUES('2026-09-25','edgarflash',1)").run();
  assert.equal((await f.store.candidates(NOW,SCHEDULE_MANIFEST)).length,0);
 });
+test('selection keeps the earliest slot and id tie-break before considering later work',async()=>{
+ const f=fixture();only(f);
+ for(const time of [NOW,NOW-60000])await f.store.enqueue([{target:f.target,payload:{target:f.target.name,scheduledTime:time,cron:f.target.schedule}}],NOW,SHA);
+ await f.store.enqueue([{target:f.target,payload:{target:f.target.name,scheduledTime:NOW-60000,cron:f.target.schedule,drainOnly:true}}],NOW,SHA);
+ const ordered=f.sql.prepare("SELECT id FROM ops_runs WHERE state='pending' ORDER BY scheduled_at,id").all();
+ assert.equal((await f.store.candidates(NOW,SCHEDULE_MANIFEST))[0].id,ordered[0].id);
+ // An exhausted oldest row cannot be skipped in favor of a later high-limit row.
+ f.sql.prepare('UPDATE ops_runs SET call_limit=1 WHERE id=?').run(ordered[0].id);
+ f.sql.prepare("INSERT INTO ops_daily_dispatch VALUES('2026-09-25',?,1)").run(f.target.name);
+ assert.deepEqual(await f.store.candidates(NOW,SCHEDULE_MANIFEST),[]);
+ assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM ops_runs WHERE state='pending'").get().n,3);
+});
+test('future slots, backoff, all unresolved lock states, and fleet exhaustion remain ineligible',async()=>{
+ for(const lockState of ['running','uncertain','accepted']){
+  const f=fixture();only(f);const run=await f.store.claim(await queued(f),f.target,NOW,SHA);
+  if(lockState!=='running')f.sql.prepare('UPDATE ops_runs SET state=? WHERE id=?').run(lockState,run.id);
+  await f.store.enqueue([{target:f.target,payload:{target:f.target.name,scheduledTime:NOW+60000,cron:f.target.schedule}}],NOW,SHA);
+  assert.deepEqual(await f.store.candidates(NOW+60000,SCHEDULE_MANIFEST),[]);
+  assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM ops_runs WHERE state='pending'").get().n,1);
+ }
+ const f=fixture();only(f);await queued(f,f.target,NOW+60000);
+ assert.deepEqual(await f.store.candidates(NOW,SCHEDULE_MANIFEST),[]);
+ f.sql.prepare('UPDATE ops_targets SET next_allowed=?').run(NOW+120000);
+ assert.deepEqual(await f.store.candidates(NOW+60000,SCHEDULE_MANIFEST),[]);
+ f.sql.prepare('UPDATE ops_targets SET next_allowed=0').run();
+ f.sql.prepare("INSERT INTO ops_daily_dispatch VALUES('2026-09-25','*',2000)").run();
+ assert.deepEqual(await f.store.candidates(NOW+60000,SCHEDULE_MANIFEST),[]);
+ assert.equal(f.sql.prepare("SELECT COUNT(*) n FROM ops_runs WHERE state='pending'").get().n,1);
+});
+test('fair selection orders eligible targets by service age then deadline and id, at the existing tick bound',async()=>{
+ const f=fixture();await f.store.enqueue(SCHEDULE_MANIFEST.map(target=>({target,payload:{target:target.name,scheduledTime:NOW,cron:target.schedule}})),NOW,SHA);
+ const names=SCHEDULE_MANIFEST.map(t=>t.name).sort();
+ for(const name of names){
+  f.sql.prepare('UPDATE ops_targets SET last_started=? WHERE target=?').run(name===names[0]?1:0,name);
+  f.sql.prepare('UPDATE ops_runs SET deadline=? WHERE target=?').run(name===names[1]?NOW-1:NOW,name);
+ }
+ const rows=await f.store.candidates(NOW,SCHEDULE_MANIFEST);
+ const expected=f.sql.prepare('SELECT r.id FROM ops_runs r JOIN ops_targets t ON t.target=r.target ORDER BY t.last_started,r.deadline,r.id LIMIT 4').all();
+ assert.equal(rows.length,4);assert.deepEqual(rows.map(r=>r.id),expected.map(r=>r.id));
+ assert.equal(rows[0].target,names[1]);assert.ok(!rows.some(r=>r.target===names[0]));
+});
 test('status projects only known fields and retains the existing read interface',async()=>{
  const f=fixture();f.sql.prepare("INSERT INTO scheduler_state VALUES('scheduler:state',?)").run(JSON.stringify({lastTick:NOW,secret:'private-secret',targetStates:{edgarflash:{lastStatus:'success',lastCompletedAt:NOW,token:'private-token'}}}));
  const response=await worker.fetch(new Request('https://ops/status'),f.env);const body=await response.json();

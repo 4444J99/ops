@@ -40,15 +40,20 @@ export class RunStore {
   if(!admitted.length)return [];
   if(admitted.length>256)throw new Error('target_selection_bound');
   const day=new Date(now).toISOString().slice(0,10);
+  // Drive selection from bounded admission, not every pending slot. CROSS JOIN
+  // keeps SQLite's loop order; the pending-order index finds one oldest slot
+  // per target before eligibility and the existing fair dispatch ordering.
   const result=await this.db.prepare(`WITH admitted AS (
       SELECT json_extract(value,'$.target') AS target,json_extract(value,'$.limit') AS call_limit FROM json_each(?)
-    ) SELECT r.* FROM ops_runs r JOIN ops_targets t ON t.target=r.target JOIN admitted a ON a.target=r.target
+    ) SELECT r.* FROM admitted a
+    CROSS JOIN ops_targets t ON t.target=a.target
+    CROSS JOIN ops_runs r ON r.id=(SELECT next.id FROM ops_runs next
+      WHERE next.target=a.target AND next.state='pending' ORDER BY next.scheduled_at,next.id LIMIT 1)
     LEFT JOIN ops_daily_dispatch d ON d.scope=r.target AND d.day=?
     WHERE r.state='pending' AND r.scheduled_at<=? AND t.next_allowed<=?
       AND COALESCE(d.calls,0)<MIN(r.call_limit,a.call_limit)
       AND COALESCE((SELECT calls FROM ops_daily_dispatch WHERE scope='*' AND day=?),0)<2000
       AND NOT EXISTS(SELECT 1 FROM ops_runs live WHERE live.target=r.target AND live.state IN('running','uncertain','accepted'))
-      AND r.id=(SELECT next.id FROM ops_runs next WHERE next.target=r.target AND next.state='pending' ORDER BY next.scheduled_at,next.id LIMIT 1)
     ORDER BY t.last_started,r.deadline,r.id LIMIT ?`).bind(JSON.stringify(admitted),day,now,now,day,MAX_DISPATCHES_PER_TICK).all<Run>();
   return result.results??[];
  }

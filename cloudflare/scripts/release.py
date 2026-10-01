@@ -156,7 +156,7 @@ def source_identity():
  if remote!='https://github.com/4444J99/ops':raise SafeError('source_repository_mismatch')
  return sha
 
-MIGRATIONS=('migrations/0001_initial.sql','migrations/0002_isolated_runs.sql','migrations/0003_admission_provenance.sql')
+MIGRATIONS=('migrations/0001_initial.sql','migrations/0002_isolated_runs.sql','migrations/0003_admission_provenance.sql','migrations/0004_pending_target_order.sql')
 def migrate(client):
  for name in MIGRATIONS:
   statement=''

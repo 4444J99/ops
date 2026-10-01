@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import re
 import sqlite3
 import unittest
 from pathlib import Path
@@ -48,6 +49,23 @@ class ReleaseTests(unittest.TestCase):
   self.assertEqual(f.db.execute('SELECT COUNT(*) FROM ops_targets').fetchone()[0],1)
   row=f.db.execute('SELECT * FROM ops_control').fetchone()
   self.assertGreater(row['activate_after'],m.time.time()*1000+15*60000)
+ def test_pending_order_index_is_installed_without_rewriting_owned_state(self):
+  f=Fake()
+  for name in m.MIGRATIONS:
+   if name.endswith('0004_pending_target_order.sql'):continue
+   f.db.executescript((m.ROOT/name).read_text())
+  for state in ('pending','completed','accepted'):
+   f.db.execute('''INSERT INTO ops_runs
+    (id,target,environment,repository_id,service,account_ref,contract_version,scheduled_at,mode,state,created_at,source_sha,call_limit,deadline)
+    VALUES(?,?,'production',1,'fixture','fixture',1,0,'scheduled',?,0,?,100,0)''',
+    (state,state,state,'a'*40))
+  f.db.execute("INSERT INTO scheduler_state VALUES('scheduler:state','{\"lastTick\":1,\"targetStates\":{}}')")
+  tables=('ops_runs','ops_targets','scheduler_state')
+  before={table:[tuple(row) for row in f.db.execute('SELECT * FROM '+table+' ORDER BY 1')] for table in tables}
+  m.migrate(f);m.migrate(f)
+  after={table:[tuple(row) for row in f.db.execute('SELECT * FROM '+table+' ORDER BY 1')] for table in tables}
+  self.assertEqual(before,after)
+  self.assertIsNotNone(f.db.execute("SELECT sql FROM sqlite_master WHERE name='ops_pending_target_order'").fetchone())
  def test_upload_failure_never_admits(self):
   f=Fake();f.failed=True
   with self.assertRaisesRegex(m.SafeError,'upload_failed'):
@@ -199,5 +217,67 @@ class LiveBindingTests(unittest.TestCase):
  def test_binding_type_drift_refused(self):
   with self.assertRaisesRegex(m.SafeError,'live_binding_type_drift'):
    m.validate_live_bindings(self.settings({'name':'EDGARFLASH','type':'service'},{'name':'SCHED_DB','type':'kv'}),self.targets())
+
+class CandidateQueryTests(unittest.TestCase):
+ """Real SQLite query-plan/VM regression; VM steps are not D1 billed row counts."""
+ def query(self):
+  source=(m.ROOT/'src/run-store.ts').read_text()
+  return re.search(r'async candidates[\s\S]*?prepare\(`([\s\S]*?)`\)\.bind',source).group(1)
+ def fixture(self,history=0,backlog=1,disabled_backlog=0,repaired=True):
+  db=sqlite3.connect(':memory:')
+  for name in m.MIGRATIONS:
+   if not repaired and name.endswith('0004_pending_target_order.sql'):continue
+   db.executescript((m.ROOT/name).read_text())
+  now=1758767400000
+  names=['target'+str(i) for i in range(6)]
+  def records():
+   for target in names:
+    for i in range(history):
+     yield (target+':history:'+str(i),target,now-1000000000-i*60000,'completed',now)
+    for i in range(backlog):
+     yield (target+':pending:'+str(i).zfill(4),target,now-i*60000,'pending',now)
+   for i in range(disabled_backlog):
+    yield ('disabled:'+str(i).zfill(5),'disabled',now-i*60000,'pending',now)
+  db.executemany('''INSERT INTO ops_runs
+   (id,target,environment,repository_id,service,capability,account_ref,contract_version,scheduled_at,mode,state,created_at,source_sha,call_limit,deadline)
+   VALUES(?,?,'production',1,'fixture','Scheduled','fixture',1,?,'scheduled',?,0,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',100,?)''',records())
+  params=(json.dumps([{'target':name,'limit':100} for name in names]),'2025-09-25',now,now,'2025-09-25',4)
+  return db,params
+ def measured(self,db,query,params):
+  # Count SQLite's executed VM instructions in 100-instruction intervals.
+  # The residual interval can differ by <100; thresholds allow that variation.
+  steps=[0]
+  def progress():steps[0]+=100;return 0
+  db.set_progress_handler(progress,100)
+  try:rows=db.execute(query,params).fetchall()
+  finally:db.set_progress_handler(None,0)
+  return rows,steps[0]
+ def test_selection_work_is_bounded_by_admitted_targets_with_retained_history_and_backlog(self):
+  old=(m.ROOT/'test/fixtures/candidates-before-0004.sql').read_text()
+  query=self.query();measurements=[]
+  for history,backlog,disabled in [(0,1,0),(5000,1,0),(0,600,0),(5000,600,10000)]:
+   legacy,params=self.fixture(history,backlog,disabled,repaired=False)
+   repaired,_=self.fixture(history,backlog,disabled)
+   try:
+    expected,before=self.measured(legacy,old,params)
+    actual,after=self.measured(repaired,query,params)
+    self.assertEqual(actual,expected)
+    self.assertEqual(repaired.execute('SELECT COUNT(*) FROM ops_runs').fetchone()[0],6*(history+backlog)+disabled)
+    measurements.append({'history_per_target':history,'pending_per_target':backlog,'disabled_pending':disabled,
+     'legacy_vm_steps_approx':before,'repaired_vm_steps_approx':after})
+   finally:legacy.close();repaired.close()
+  small=measurements[0]['repaired_vm_steps_approx']
+  for measurement in measurements[1:]:
+   self.assertLessEqual(measurement['repaired_vm_steps_approx'],small+2000)
+  self.assertGreater(measurements[-1]['legacy_vm_steps_approx'],measurements[-1]['repaired_vm_steps_approx']*20)
+  print(json.dumps({'sqlite_version':sqlite3.sqlite_version,'candidate_query_vm_measurements':measurements}))
+ def test_plan_probes_one_ordered_pending_slot_and_run_primary_key_per_admitted_target(self):
+  db,params=self.fixture(history=100,backlog=100)
+  try:
+   plan=[row[3] for row in db.execute('EXPLAIN QUERY PLAN '+self.query(),params)]
+   self.assertTrue(any('SEARCH next USING COVERING INDEX ops_pending_target_order (target=?)' in row for row in plan),plan)
+   self.assertTrue(any('SEARCH r USING INDEX sqlite_autoindex_ops_runs_1 (id=?)' in row for row in plan),plan)
+   self.assertFalse(any('SCAN r' in row or 'LAST TERM OF ORDER BY' in row for row in plan),plan)
+  finally:db.close()
 
 if __name__=='__main__':unittest.main()
