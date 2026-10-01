@@ -221,7 +221,20 @@ def validate_live_bindings(settings,targets):
  return services
 
 def preflight(client,bundle,targets,sha):
- client.resolve_account();settings=client.settings(WORKER);files=client.source()
+ client.resolve_account();settings=client.settings(WORKER)
+ # Predecessor verification reads owner records. Resolve and validate their
+ # exact database before the first query, including on a fresh Client.
+ bindings=settings.get('bindings',[])
+ services=validate_live_bindings(settings,targets)
+ for t in targets:
+  b=services[t['binding']];o=t['ownership']
+  if b.get('service')!=o['service'] or (b.get('entrypoint') or 'default')!=o['capability']:raise SafeError('live_capability_identity_drift')
+ db=[b for b in bindings if b.get('name')=='SCHED_DB' and b.get('type')=='d1']
+ if len(db)!=1:raise SafeError('scheduler_database_missing')
+ database=db[0].get('database_id')
+ if database!='f1ce9d34-bd31-4573-b752-332bc6313efd':raise SafeError('scheduler_database_identity_drift')
+ client.db=database
+ files=client.source()
  if files=={'index.js':bundle}:source='same_artifact'
  elif digest(files['index.js'])==LEGACY and set(files)=={'index.js',*HELPERS} and all(blob(files[k])==v for k,v in HELPERS.items()):source='verified_incident_baseline'
  elif verify_predecessor(client,files,sha):source='verified_predecessor'
@@ -234,15 +247,6 @@ def preflight(client,bundle,targets,sha):
   validate_dormant_bindings(configuration,targets)
   if crons[name] not in ([],['* * * * *']):raise SafeError('dormant_schedule_drift:'+name)
   dormant[name]={'files':saved,'settings':configuration,'crons':crons[name]}
- bindings=settings.get('bindings',[])
- services=validate_live_bindings(settings,targets)
- for t in targets:
-  b=services[t['binding']];o=t['ownership']
-  if b.get('service')!=o['service'] or (b.get('entrypoint') or 'default')!=o['capability']:raise SafeError('live_capability_identity_drift')
- db=[b for b in bindings if b.get('name')=='SCHED_DB' and b.get('type')=='d1']
- if len(db)!=1:raise SafeError('scheduler_database_missing')
- client.db=db[0]['database_id']
- if client.db!='f1ce9d34-bd31-4573-b752-332bc6313efd':raise SafeError('scheduler_database_identity_drift')
  token_present=any(b.get('name')=='OP_SA_TOKEN' and b.get('type') in ('secret_text','plain_text') for b in bindings)
  legacy=client.sql("SELECT payload FROM scheduler_state WHERE id='scheduler:state'")
  if len(legacy)!=1:raise SafeError('legacy_state_missing')
