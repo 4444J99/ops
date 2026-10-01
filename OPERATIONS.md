@@ -236,6 +236,27 @@ Use the existing incident as the parent and link narrowly scoped PRs. Do not add
 a new scheduler, witness, credentials repository, standing automation, or parallel
 registry to manage this migration. Do not touch active PRDS/engine work branches.
 
+## October 1 incident continuation
+
+The existing [incident](https://github.com/4444J99/ops/issues/6) remains open.
+Cloudflare issued D1 daily read-limit notices on September 27–October 1. The
+[restored witness](https://github.com/4444J99/limen/actions/runs/36873731833)
+observed 5,116,186 adaptive D1 rows read on October 1 at 14:06 UTC, including
+5,108,832 attributed to the shared database. KV writes (38) and lists (4) were
+low. These analytics locate the shared-database load; they do not prove that one
+query alone caused exhaustion. Scheduler execution was unreadable, so the six
+job states were unknown rather than proven failures.
+
+[ops#24](https://github.com/4444J99/ops/pull/24) bounds pending-run selection by
+admitted targets and adds an index without deleting queued or historical work.
+Its local and hosted D1 checks passed; the source merge is not a production
+receipt. The ops owner must complete authenticated predecessor, binding, clock
+and state checks before applying the exact accepted revision. The exhausted
+free-tier read allowance resets on October 2 at 00:00 UTC. After deployment,
+verify activation, actual per-run completions and a complete UTC usage window
+with the existing headroom reserve before closing the parent incident. Keep
+the existing workload and preserve its custody; do not bypass a failed preflight.
+
 ## Sources
 
 [C1] https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/

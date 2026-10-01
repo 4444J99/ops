@@ -280,4 +280,58 @@ class CandidateQueryTests(unittest.TestCase):
    self.assertFalse(any('SCAN r' in row or 'LAST TERM OF ORDER BY' in row for row in plan),plan)
   finally:db.close()
 
+class PreflightClientTests(unittest.TestCase):
+ """Exercise real request authorization with value-free fake provider HTTP."""
+ DATABASE='f1ce9d34-bd31-4573-b752-332bc6313efd'
+ def run_preflight(self,database=DATABASE):
+  calls=[];client=m.Client('test-only-token')
+  class Response(io.BytesIO):
+   def __init__(self,value,kind='application/json'):
+    super().__init__(value if isinstance(value,bytes) else json.dumps(value).encode())
+    self.headers={'Content-Type':kind}
+  def provider(request,timeout):
+   path=request.full_url.removeprefix(m.API)
+   calls.append((request.get_method(),path))
+   if path=='/accounts?per_page=50':result=[{'id':'a'*32}]
+   elif path.endswith('/workers/subdomain'):result={'subdomain':'ivixivi'}
+   elif path.endswith('/settings'):
+    result={'bindings':[{'name':'SCHED_DB','type':'d1','database_id':database}]
+     if '/'+m.WORKER+'/' in path else []}
+   elif path.endswith('/content/v2'):
+    return Response(b'old-live-bundle','application/javascript')
+   elif path.endswith('/schedules'):
+    result={'schedules':[{'cron':'* * * * *'}] if '/'+m.WORKER+'/' in path else []}
+   elif path.endswith('/query'):
+    self.assertEqual(path,'/accounts/'+'a'*32+'/d1/database/'+self.DATABASE+'/query')
+    self.assertEqual(request.get_method(),'POST')
+    query=json.loads(request.data)['sql']
+    self.assertTrue(query.startswith('SELECT '))
+    if query==m.CONTROL:rows=[{'source_sha':'b'*40}]
+    elif query.startswith('SELECT bundle_sha256'):
+     rows=[{'bundle_sha256':m.digest(b'old-live-bundle')}]
+    elif query.startswith('SELECT payload FROM scheduler_state'):
+     rows=[{'payload':json.dumps({'lastTick':m.time.time()*1000,'targetStates':{}})}]
+    else:raise AssertionError(query)
+    result=[{'success':True,'results':rows}]
+   else:raise AssertionError(path)
+   return Response({'success':True,'errors':[],'result':result})
+  with patch.object(m.OPENER,'open',side_effect=provider):
+   try:return m.preflight(client,b'new-built-bundle',[],'a'*40),calls
+   except m.SafeError:
+    self.calls=calls;self.client=client
+    raise
+ def test_fresh_client_resolves_exact_database_before_predecessor_selects(self):
+  result,calls=self.run_preflight()
+  self.assertEqual(result[-1]['source_relation'],'verified_predecessor')
+  self.assertEqual(sum(path.endswith('/query') for method,path in calls),3)
+  self.assertTrue(all(method=='GET' or path.endswith('/query') for method,path in calls))
+ def test_wrong_or_missing_database_refused_before_any_sql(self):
+  for database in ('wrong-fixture-database',None):
+   with self.subTest(database=database),self.assertRaisesRegex(
+    m.SafeError,'^scheduler_database_identity_drift$'):
+    self.run_preflight(database)
+   self.assertIsNone(self.client.db)
+   self.assertFalse(any(path.endswith('/query') for method,path in self.calls))
+   self.assertTrue(all(method=='GET' for method,path in self.calls))
+
 if __name__=='__main__':unittest.main()
